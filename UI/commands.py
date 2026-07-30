@@ -1,11 +1,11 @@
 from dataclasses import dataclass, field
 from typing import Callable, Optional
-
+import session
 from rich.markdown import Heading, Markdown
 from rich.markup import escape
 from rich.padding import Padding
 from rich.rule import Rule
-
+import questionary
 from .render import console, print_step, print_welcome_banner
 
 
@@ -16,7 +16,7 @@ class LeftAlignedHeading(Heading):
     def __rich_console__(self,console,options):
         text =self.text
         text.justify = "left"
-        yield
+        yield text
 
 # 全局替代Markdown 的标题渲染元素
 Markdown.elements["heading_open"] = LeftAlignedHeading
@@ -31,6 +31,8 @@ class SessionState:
     input_tokens :int = 0
     output_tokens:int =0
     model_name:str = ""
+    # 当前会话 ID，用于把消息追加到对应的 jsonl 文件
+    session_id: str = ""
     # 最近一轮 user input 触发的所有 model API 调用记录
     last_api_calls: list = field(default_factory=list)
 
@@ -51,7 +53,7 @@ def print_divider() -> None:
     console.print(Rule(style="grey50"))
 
 
-
+# 这里是解决输出文字太长的问题
 def _truncate(text, limit: int = 120) -> str:
     """
     截断并 escape，用于 tool 参数 / 返回值 / 用户输入这类可能过长的内容。
@@ -156,6 +158,8 @@ def cmd_new(state: SessionState) -> bool:
     state.input_tokens = 0
     state.output_tokens = 0
     state.last_api_calls.clear()
+    # 换一个新的会话 ID，后续消息写进新文件
+    state.session_id = session.new_session_id()
     console.print("已开启新会话\n")
     return True
 
@@ -167,6 +171,60 @@ def cmd_status(state: SessionState) -> bool:
     console.print(f"累计输出 tokens：{state.output_tokens}\n")
     return True
 
+def _summary_line(mtime, prompt: str) -> str:
+    """
+    拼一条会话列表的展示文本：修改时间 + 首条用户输入摘要。
+    """
+    prompt = " ".join(str(prompt).split())
+    if len(prompt) > 50:
+        prompt = prompt[:50] + "..."
+    return f"{mtime:%m-%d %H:%M}  {prompt}"
+async def cmd_resume(state: SessionState) -> bool:
+    """
+    列出当前项目的历史会话，选中后恢复对话历史。
+    """
+    sessions = session.list_sessions()
+    if not sessions:
+        console.print("(当前项目还没有历史会话)\n")
+        return True
+
+    choices = [
+        questionary.Choice(title=_summary_line(mtime, prompt), value=sid)
+        for sid, mtime, prompt in sessions
+    ]
+    # 用 ask_async 而不是 ask：ask 内部会 asyncio.run()，跟外层事件循环冲突
+    # 包在 in_terminal() 里：Repl 的 Application 还在跑，得先挂起它，让 questionary 自己的 Application 接管终端
+    from prompt_toolkit.application import in_terminal
+    async with in_terminal():
+        selected = await questionary.select(
+            "选择要恢复的会话（上下键移动，回车确认）：", choices=choices
+        ).ask_async()
+    # 用户按 Ctrl+C 取消选择
+    if selected is None:
+        return True
+
+    # 还原对话历史，并把会话 ID 切换成选中的旧会话，后续消息继续追加到同一个文件
+    state.history = session.load_history(selected)
+    state.session_id = selected
+
+    # jsonl 里每条模型回复都带 usage，把会话的 token 用量累加回来
+    state.input_tokens = sum(
+        m.usage.input_tokens for m in state.history if m.kind == "response"
+    )
+    state.output_tokens = sum(
+        m.usage.output_tokens for m in state.history if m.kind == "response"
+    )
+    # 最近一轮的 API 调用记录只在进程内有效，没法恢复，清空
+    state.last_api_calls.clear()
+
+    # 把恢复的对话回放到屏幕上
+    console.print(f"\n已恢复会话 {selected[:8]}，共 {len(state.history)} 条消息：\n")
+    for msg in state.history:
+        for part in msg.parts:
+            # 回放和实时输出共用同一套 part 渲染逻辑
+            print_part(part)
+    console.print()
+    return True
 
 def cmd_api_detail(state: SessionState) -> bool:
     """
@@ -202,4 +260,5 @@ COMMANDS = {
     "api-detail": Command("api-detail", "显示最近一轮 model API 调用详情", cmd_api_detail),
     "help": Command("help", "显示可用命令", cmd_help),
     "exit": Command("exit", "退出程序", cmd_exit),
+    "resume": Command("resume", "恢复历史会话", cmd_resume)
 }
