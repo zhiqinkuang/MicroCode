@@ -16,18 +16,20 @@ from UI.commands import (
 # 识别用户输入的指令
 async def handle_command(user_input, state):
     """
-    处理以 / 开头的命令。
-    返回 'pass'：不是命令，主循环继续往下走交给 Agent；
+    处理以 / 开头的输入。
+    返回 'pass'：不是已知命令，主循环继续交给 Agent 当普通输入处理；
     返回 'continue'：命令已处理，主循环跳到下一轮；
     返回 'break'：命令要求退出主循环。
     """
     if not user_input.startswith("/"):
         return "pass"
-    cmd_name = user_input[1:].split()[0]
+    # 第一个 token 是命令名；空输入（只有 "/"）或拼错的命令都不当命令处理
+    parts = user_input[1:].split()
+    cmd_name = parts[0] if parts else ""
     command = COMMANDS.get(cmd_name)
     if command is None:
-        console.print(f"未知命令：/{cmd_name}，输入 /help 查看可用命令\n")
-        return "continue"
+        # 以 / 开头但不是已知命令：当成普通输入交给 Agent，避免误判路径/代码片段
+        return "pass"
     # 用 asyncio.iscoroutine 兼容 async / 同步两种 handler
     result = command.handler(state)
     if asyncio.iscoroutine(result):
@@ -42,7 +44,7 @@ async def run_agent_loop(user_input, state):
     """
     api_call_log.clear()
 
-    async with agent.iter(user_input, message_history=state.history) as run:
+    async with agent.iter(user_input, message_history=state.history,deps=state.read_file_state) as run:
         node = run.next_node
 
         while not isinstance(node, End):
@@ -80,12 +82,15 @@ async def main():
     repl = Repl(state)
 
     async def on_submit(text):
-        # / 开头：交给命令处理
+        # / 开头：先尝试当作命令解析；未命中的命令原样当作普通输入交给 Agent
         if text.startswith("/"):
             action = await handle_command(text, state)
             if action == "break":
                 repl.exit()
-            return
+                return
+            if action == "continue":
+                return
+            # action == "pass"：以 / 开头但不是已知命令，继续走 Agent 分支
 
         # 普通输入：交给 Agent，开启 working 指示器
         repl.start_working()

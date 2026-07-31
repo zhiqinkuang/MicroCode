@@ -27,7 +27,7 @@ MODES = [DEFAULT, ACCEPT_EDITS, AUTO, BYPASS]
 # 只读工具，任何模式都自动放行（读取不会改动系统，放行没风险）
 READONLY_TOOLS = {"read_file"}
 # 编辑文件类工具，acceptEdits 模式下自动放行
-EDIT_TOOLS = {"write_file"}
+EDIT_TOOLS = {"write_file", "edit_file"}
 # 工具自检注册表：通用权限规则只认工具名，但危不危险往往取决于参数，只有工具自己最懂参数的语义
 TOOL_SELF_CHECKS = {}
 

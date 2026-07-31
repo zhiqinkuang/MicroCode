@@ -3,7 +3,7 @@ Agent 实例化：把 model / instructions / tools / hooks 拼起来。
 """
 import os
 from pathlib import Path
-
+from .file_state import ReadFileState
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.deepseek import DeepSeekProvider
@@ -36,5 +36,6 @@ agent = Agent(
         "如果有错误就修复并重新运行，直到确认正确。"
     ),
     tools=TOOLS,
+deps_type=ReadFileState,
     capabilities=[hooks],
 )

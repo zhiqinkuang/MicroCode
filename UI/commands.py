@@ -6,6 +6,7 @@ from rich.markup import escape
 from rich.padding import Padding
 from rich.rule import Rule
 import questionary
+from agent.file_state import ReadFileState
 from .render import console, print_step, print_welcome_banner
 
 
@@ -35,6 +36,8 @@ class SessionState:
     session_id: str = ""
     # 最近一轮 user input 触发的所有 model API 调用记录
     last_api_calls: list = field(default_factory=list)
+    # 本会话的文件读取状态：read_file/edit_file/write_file 共享，/new 时换新实例
+    read_file_state: ReadFileState = field(default_factory=ReadFileState)
 
 
 @dataclass
@@ -158,6 +161,8 @@ def cmd_new(state: SessionState) -> bool:
     state.input_tokens = 0
     state.output_tokens = 0
     state.last_api_calls.clear()
+    # 换一个新的 ReadFileState：新会话没读过任何文件，旧会话的读取状态不该带过来
+    state.read_file_state = ReadFileState()
     # 换一个新的会话 ID，后续消息写进新文件
     state.session_id = session.new_session_id()
     console.print("已开启新会话\n")
