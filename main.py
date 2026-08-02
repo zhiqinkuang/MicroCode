@@ -12,6 +12,7 @@ from UI.commands import (
     print_part,
     print_welcome_banner,
 )
+from mentions import build_mention_messages, extract_at_mentions
 
 # 识别用户输入的指令
 async def handle_command(user_input, state):
@@ -74,6 +75,21 @@ async def run_agent_loop(user_input, state):
     if state.session_id:
         session.append_messages(state.session_id, new_messages)
 
+def inject_at_mentions(user_input, state):
+    paths = extract_at_mentions(user_input)
+    if not paths:
+        return
+    mention_messages = build_mention_messages(paths, state.read_file_state)
+    if not mention_messages:
+        return
+    # 塞进历史：模型下一轮就能看到这些「读文件」记录
+    state.history += mention_messages
+    # 持久化，/resume 恢复会话时能连同引用的文件一起还原
+    session.append_messages(state.session_id, mention_messages)
+    # 终端回显注入了哪些文件，让你看到 @ 确实生效
+    for msg in mention_messages:
+        for part in msg.parts:
+            print_part(part)
 
 async def main():
     state = SessionState(model_name=MODEL_NAME, session_id=session.new_session_id())
@@ -92,9 +108,10 @@ async def main():
                 return
             # action == "pass"：以 / 开头但不是已知命令，继续走 Agent 分支
 
-        # 普通输入：交给 Agent，开启 working 指示器
+        # 普通输入：先把 @ 引用解析进历史，再交给 Agent，开启 working 指示器
         repl.start_working()
         try:
+            inject_at_mentions(text, state)
             await run_agent_loop(text, state)
         except asyncio.CancelledError:
             # 用户按 ESC / Ctrl+C 打断：交给 _process 的 except 统一打印中断信息

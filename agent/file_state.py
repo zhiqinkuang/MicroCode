@@ -28,6 +28,17 @@ class ReadFileState:
             "limit": limit,
         }
 
+    # 检查是否已经进行了手动修改
+    def stale_paths(self):
+        stale = []
+        for path, record in self._state.items():
+            try:
+                if os.path.getmtime(path) > record["timestamp"]:
+                    stale.append(path)
+            except OSError:
+                continue
+        return stale
+
     def get(self, path: str):
         """
         取出一个文件的登记，从没读过就返回 None。

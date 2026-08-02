@@ -10,8 +10,13 @@ from UI.render import console, print_step
 import asyncio
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 import permissions
 import classifier
+from .file_state import ReadFileState
+from .reminders import build_reminder_text
+import classifier
+import dataclasses
 @dataclass
 class ApiCall:
     """
@@ -173,3 +178,18 @@ async def _check_permission(ctx, *, call, tool_def, args, handler):
 
     # 拒绝：不执行工具，把拒绝原因回填给模型，让它停下来等用户发话，而不是自作主张绕过去
     return f"用户拒绝了对 {call.tool_name} 的调用，这次调用没有执行。请停下手上的事，等用户告诉你接下来该怎么做。"
+
+
+# 添加是否进行模型检查
+
+@hooks.on.before_model_request
+async def _inject_reminders(ctx, request_context):
+    state = ctx.deps
+    text = build_reminder_text(state)
+    if text is None:
+        return request_context
+
+    reminder = ModelRequest(parts=[UserPromptPart(content=text)])
+    new_messages = list(request_context.messages) + [reminder]
+    print_step("[dim]◇ system[/]", f"[dim]{text[:200]}[/]")
+    return dataclasses.replace(request_context, messages=new_messages)

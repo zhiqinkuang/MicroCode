@@ -7,14 +7,16 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.layout.containers import ConditionalContainer, HSplit, Window
+from prompt_toolkit.layout.containers import ConditionalContainer, Float, FloatContainer, HSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.layout import Layout
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.patch_stdout import patch_stdout
 from rich.markup import escape
 
 import permissions
+from mentions import AtFileCompleter
 from .render import console
 
 # 常驻输入区：输入框整个会话期间挂在屏幕底部不消失，Agent 输出通过 patch_stdout 打印在它上方，请求期间按 ESC / Ctrl+C 能立刻打断。
@@ -36,7 +38,12 @@ class Repl:
         self.working = False
         self._work_start = 0.0
         self._frame = 0
-        self._buffer = Buffer(multiline=False, history=InMemoryHistory())
+        self._buffer = Buffer(
+            multiline=False,
+            history=InMemoryHistory(),
+            completer=AtFileCompleter(),
+            complete_while_typing=True,
+        )
         self.app = self._build_app()
 
     def _prompt_prefix(self, line_number, wrap_count):
@@ -59,28 +66,33 @@ class Repl:
 
     def _build_app(self):
         # 从上到下：working 指示器、分割线、输入行、分割线、模式行
-        layout = Layout(
-            HSplit(
-                [
-                    ConditionalContainer(
-                        Window(FormattedTextControl(self._working_line), height=1),
-                        filter=Condition(lambda: self.working),
-                    ),
-                    self._divider(),
-                    # 输入行只占内容高度，多行自动换行撑开
-                    Window(
-                        BufferControl(buffer=self._buffer),
-                        get_line_prefix=self._prompt_prefix,
-                        height=Dimension(min=1),
-                        wrap_lines=True,
-                        dont_extend_height=True,
-                    ),
-                    self._divider(),
-                    Window(FormattedTextControl(self._mode_line), height=1),
-                ]
-            )
+        body = HSplit(
+            [
+                ConditionalContainer(
+                    Window(FormattedTextControl(self._working_line), height=1),
+                    filter=Condition(lambda: self.working),
+                ),
+                self._divider(),
+                # 输入行只占内容高度，多行自动换行撑开
+                Window(
+                    BufferControl(buffer=self._buffer),
+                    get_line_prefix=self._prompt_prefix,
+                    height=Dimension(min=1),
+                    wrap_lines=True,
+                    dont_extend_height=True,
+                ),
+                self._divider(),
+                Window(FormattedTextControl(self._mode_line), height=1),
+            ]
         )
-        return Application(layout=layout, key_bindings=self._build_key_bindings())
+        # FloatContainer 承载补全菜单浮层：@ 补全候选会跟在光标下方弹出
+        root = FloatContainer(
+            content=body,
+            floats=[
+                Float(xcursor=True, ycursor=True, content=CompletionsMenu()),
+            ],
+        )
+        return Application(layout=Layout(root), key_bindings=self._build_key_bindings())
 
     def _build_key_bindings(self):
         kb = KeyBindings()
@@ -121,6 +133,14 @@ class Repl:
     def _on_enter(self):
         # 请求中不接受新提交（输入框仍在，只是回车不触发新一轮）
         if self._task is not None:
+            return
+        # 补全菜单开着时，Enter 先应用补全项，不提交，让用户继续打后续文字
+        # 比如 @ment + Enter -> @mentions.py，光标停在末尾，还能接着敲 " 帮我看看"
+        state = self._buffer.complete_state
+        if state and state.completions:
+            # 选中了具体项就应用那个；没选中（complete_index 是 None）就应用第一个
+            completion = state.current_completion or state.completions[0]
+            self._buffer.apply_completion(completion)
             return
         text = self._buffer.text.strip()
         if not text:

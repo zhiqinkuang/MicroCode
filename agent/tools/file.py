@@ -1,5 +1,5 @@
 """
-Coding Agent 用到的三个工具：读文件、写文件、跑 shell 命令。
+文件工具：read_file / edit_file / write_file，共享 ReadFileState 做先读后写约束。
 """
 import subprocess
 import re
@@ -7,8 +7,7 @@ import os
 import permissions
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.exceptions import ModelRetry
-from .file_state import ReadFileState
-# 不指定 limit 时最多读多少行，超出的截断并提示模型用 offset 续读
+from ..file_state import ReadFileState
 DEFAULT_MAX_LINES = 2000
 
 def _with_line_numbers(content: str, start_line: int = 1) -> str:
@@ -24,6 +23,35 @@ def _with_line_numbers(content: str, start_line: int = 1) -> str:
     width = len(str(start_line + len(lines) - 1))
     return "\n".join(f"{i:>{width}}\t{line}" for i, line in enumerate(lines, start_line))
 
+# 读取文件并且执行readfile
+def read_and_register(state: ReadFileState, path: str, offset: int = 1, limit: int | None = None) -> str:
+    """
+    读取文件、按 offset/limit 切片、登记进 readFileState，返回带行号的内容。
+    read_file 工具和 @ 引用注入都调用它，所以经 @ 引入的文件和模型自己读的文件，在 readFileState 里长得一模一样。
+    """
+    # 1. 读取文件全文
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    # 2. 按 offset/limit 切片：不指定 limit 时最多取 DEFAULT_MAX_LINES 行
+    all_lines = content.splitlines()
+    total = len(all_lines)
+    start = offset - 1
+    if start >= total and total > 0:
+        return f"警告：文件只有 {total} 行，但 offset 是 {offset}，没有内容可读"
+    end = start + limit if limit is not None else start + DEFAULT_MAX_LINES
+    selected = all_lines[start:end]
+    selected_content = "\n".join(selected)
+    truncated = limit is None and end < total
+
+    # 3. 登记进会话的 readFileState：存切片后的原始内容（不带行号）和此刻的 mtime
+    state.record(path, selected_content, offset=offset, limit=limit)
+
+    # 4. 返回给模型的是带行号的版本；如果被截断，末尾附提示
+    result = _with_line_numbers(selected_content, start_line=offset)
+    if truncated:
+        result += f"\n\n（文件共 {total} 行，还有 {total - end} 行未显示。用 offset={end + 1} 继续读取）"
+    return result
 
 def read_file(ctx: RunContext[ReadFileState], path: str, offset: int = 1, limit: int | None = None) -> str:
     """读取文件内容，输出带行号。大文件请用 offset/limit 分段读取。"""
@@ -141,53 +169,3 @@ def write_file(ctx: RunContext[ReadFileState], path: str, content: str) -> str:
     # 新写入的内容同样登记进 readFileState，后续要再改就不必重读
     ctx.deps.record(path, content)
     return f"已写入 {path}"
-
-def run_command(command: str) -> str:
-    """
-    执行一条 shell 命令并返回输出。
-    """
-    try:
-        result = subprocess.run(
-            command, shell=True, capture_output=True, text=True, errors="replace", timeout=120
-        )
-        output = result.stdout
-        if result.returncode != 0:
-            output += f"\n[错误] {result.stderr}"
-        return output or "(无输出)"
-    except subprocess.TimeoutExpired:
-        return "[错误] 命令执行超时（120秒）"
-
-
-
-
-# 高危命令的特征：删除文件、提权、直写磁盘
-# rm 用 lookbehind 排除 git rm / npm rm 这类包管理器子命令（它们前面会带 "git "/"npm "）
-DANGEROUS_PATTERNS = [
-    r"(?<!git )(?<!npm )\brm\b",
-    r"\bsudo\b",
-    r"\bdd\b",
-    r"\bmkfs\w*\b",
-]
-def run_command_self_check(args: dict):
-    """
-    run_command 的权限自检：扫一遍命令字符串，命中高危特征就要求审批。
-    误伤的代价不过是多弹一次窗，绝不能把真正的高危命令漏过去。
-    """
-    command = args.get("command", "")
-    if any(re.search(pattern, command) for pattern in DANGEROUS_PATTERNS):
-        return "ask"
-    # 没命中高危特征，交给通用规则决定
-    return None
-
-
-permissions.register_self_check("run_command", run_command_self_check)
-
-# Pydantic AI 支持 tools=[plain_function]，从函数签名 + docstring 自动生成 JSON Schema
-# edit_file 和 write_file 标记 sequential=True：同一轮里的多个改文件调用必须串行执行，
-# 否则它们会基于同一份旧快照并发写盘、互相覆盖（这正是 readFileState + mtime 想防住的并发问题）
-TOOLS = [
-    read_file,
-    Tool(edit_file, sequential=True),
-    Tool(write_file, sequential=True),
-    run_command,
-]
