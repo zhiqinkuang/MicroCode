@@ -456,7 +456,10 @@ class _Picker:
             layout=layout,
             key_bindings=kb,
             style=_STYLE,
-            full_screen=False,
+            # full_screen=True：用 alternate screen 完全接管终端，
+            # 隔离外层 Repl 的 inline 渲染区与 _tick 的 invalidate 干扰，
+            # 否则 Enter/Esc 在 in_terminal() 嵌套场景下传不进 picker。
+            full_screen=True,
             mouse_support=False,
         )
 

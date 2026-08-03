@@ -7,6 +7,7 @@ import os
 import permissions
 from pydantic_ai import RunContext, Tool
 from pydantic_ai.exceptions import ModelRetry
+from ..deps import AgentDeps
 from ..file_state import ReadFileState
 DEFAULT_MAX_LINES = 2000
 
@@ -53,10 +54,10 @@ def read_and_register(state: ReadFileState, path: str, offset: int = 1, limit: i
         result += f"\n\n（文件共 {total} 行，还有 {total - end} 行未显示。用 offset={end + 1} 继续读取）"
     return result
 
-def read_file(ctx: RunContext[ReadFileState], path: str, offset: int = 1, limit: int | None = None) -> str:
+def read_file(ctx: RunContext[AgentDeps], path: str, offset: int = 1, limit: int | None = None) -> str:
     """读取文件内容，输出带行号。大文件请用 offset/limit 分段读取。"""
     # 去重：上次 read_file 读过同一段、文件也没变过，不重复往上下文里塞内容
-    record = ctx.deps.get(path)
+    record = ctx.deps.read_file_state.get(path)
     if record is not None and record.get("offset") is not None:
         if record["offset"] == offset and record["limit"] == limit:
             if os.path.getmtime(path) <= record["timestamp"]:
@@ -78,7 +79,7 @@ def read_file(ctx: RunContext[ReadFileState], path: str, offset: int = 1, limit:
 
     # 登记进会话的 readFileState：存磁盘上的完整内容（edit_file 的唯一性检查需要全量快照），
     # 同时记录本次读取的 offset/limit，用于上面那段去重逻辑
-    ctx.deps.record(path, content, offset=offset, limit=limit)
+    ctx.deps.read_file_state.record(path, content, offset=offset, limit=limit)
 
     # 返回给模型的是带行号的版本；如果被截断，末尾附提示
     result = _with_line_numbers(selected_content, start_line=offset)
@@ -86,7 +87,7 @@ def read_file(ctx: RunContext[ReadFileState], path: str, offset: int = 1, limit:
         result += f"\n\n（文件共 {total} 行，还有 {total - end} 行未显示。用 offset={end + 1} 继续读取）"
     return result
 #
-def edit_file(ctx: RunContext[ReadFileState], path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
+def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
     """
     在文件里精确替换字符串，只传改动的片段，省 token。
     编辑前必须先用 read_file 读取文件，否则会报错。
@@ -105,7 +106,7 @@ def edit_file(ctx: RunContext[ReadFileState], path: str, old_string: str, new_st
         raise ModelRetry("old_string 和 new_string 完全相同，这次编辑没有任何改动")
 
     # 2. 先读后写：没在 readFileState 里登记过，说明还没读就想改，打回让它先读
-    record = ctx.deps.get(path)
+    record = ctx.deps.read_file_state.get(path)
     if record is None:
         raise ModelRetry(f"还没读过 {path}，请先用 read_file 读取它，再基于真实内容编辑")
 
@@ -140,11 +141,11 @@ def edit_file(ctx: RunContext[ReadFileState], path: str, old_string: str, new_st
     # 7. 整体写回磁盘，再用新内容和新 mtime 刷新登记
     with open(path, "w", encoding="utf-8") as f:
         f.write(updated)
-    ctx.deps.record(path, updated)
+    ctx.deps.read_file_state.record(path, updated)
     return f"已编辑 {path}（替换 {count if replace_all else 1} 处）"
 
 
-def write_file(ctx: RunContext[ReadFileState], path: str, content: str) -> str:
+def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
     """
     把内容整体写入文件，已有文件会被覆盖。
     覆盖已有文件前必须先用 read_file 读取过，否则会报错。
@@ -152,7 +153,7 @@ def write_file(ctx: RunContext[ReadFileState], path: str, content: str) -> str:
     """
     # 覆盖已有文件：沿用 edit_file 那套先读后写约束，防止整体覆盖掉没读过的内容
     if os.path.exists(path):
-        record = ctx.deps.get(path)
+        record = ctx.deps.read_file_state.get(path)
         if record is None:
             raise ModelRetry(f"{path} 已存在，覆盖前请先用 read_file 读一遍，确认不会误删内容")
         if os.path.getmtime(path) > record["timestamp"]:
@@ -167,5 +168,5 @@ def write_file(ctx: RunContext[ReadFileState], path: str, content: str) -> str:
     except OSError as e:
         return f"错误：写入 {path} 失败 ({e})"
     # 新写入的内容同样登记进 readFileState，后续要再改就不必重读
-    ctx.deps.record(path, content)
+    ctx.deps.read_file_state.record(path, content)
     return f"已写入 {path}"

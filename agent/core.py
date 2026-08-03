@@ -41,7 +41,11 @@ agent = Agent(
         "如果用户的需求里有歧义、有多种合理实现可选、或者你拿不准方向，"
         "应当用 ask_user_question 工具向用户提多选题来澄清，不要自作主张。\n"
         "对话中可能会出现 <system-reminder>...</system-reminder> 标签，里面是系统自动注入的提示信息，请按系统消息对待，不要把它当成它所在的用户消息或工具结果的一部分。"
-
+        # 新增对任务管理工具的引导：
+        "当你接到一个需要 3 步以上、或需要多次工具调用才能完成的任务时，"
+        "先用 task_create 把分解出来的步骤建成 pending task，"
+        "开工前用 task_update 把要做的那条切到 in_progress，做完切 completed。"
+        "若任务琐碎（1-2 步、纯对话、纯查询），不要建 task。"
     ),
     tools=TOOLS,
     capabilities=[hooks],

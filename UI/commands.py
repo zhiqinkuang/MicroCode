@@ -7,6 +7,7 @@ from rich.padding import Padding
 from rich.rule import Rule
 import questionary
 from agent.file_state import ReadFileState
+from tasks_store import TasksStore
 from .render import console, print_step, print_welcome_banner
 
 
@@ -38,6 +39,13 @@ class SessionState:
     last_api_calls: list = field(default_factory=list)
     # 本会话的文件读取状态：read_file/edit_file/write_file 共享，/new 时换新实例
     read_file_state: ReadFileState = field(default_factory=ReadFileState)
+    # 本会话的 task 存储：按 session_id 隔离落盘，/new /resume 时换新实例
+    tasks_store: TasksStore = field(default=None)
+
+    def __post_init__(self):
+        # tasks_store 依赖 session_id，没法用 default_factory（拿不到其他字段），在 __post_init__ 里按 session_id 建
+        # field(default=None) 只是占位，到这里才真正赋值；/new /resume 改 session_id 后也会重建
+        self.tasks_store = TasksStore(self.session_id)
 
 
 @dataclass
@@ -165,6 +173,8 @@ def cmd_new(state: SessionState) -> bool:
     state.read_file_state = ReadFileState()
     # 换一个新的会话 ID，后续消息写进新文件
     state.session_id = session.new_session_id()
+    # tasks_store 按 session_id 隔离落盘，新会话用全新空 store
+    state.tasks_store = TasksStore(state.session_id)
     console.print("已开启新会话\n")
     return True
 
@@ -211,6 +221,8 @@ async def cmd_resume(state: SessionState) -> bool:
     # 还原对话历史，并把会话 ID 切换成选中的旧会话，后续消息继续追加到同一个文件
     state.history = session.load_history(selected)
     state.session_id = selected
+    # tasks_store 按 session_id 重建：旧会话磁盘上的 task 文件会被 __init__ 灌进内存，UI 面板直接显示历史 task
+    state.tasks_store = TasksStore(state.session_id)
 
     # jsonl 里每条模型回复都带 usage，把会话的 token 用量累加回来
     state.input_tokens = sum(

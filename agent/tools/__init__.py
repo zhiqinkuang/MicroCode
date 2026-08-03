@@ -13,6 +13,7 @@ from . import shell as _shell  # noqa: F401
 from .ask_user import ask_user_question
 from .file import read_and_register, read_file, edit_file, write_file
 from .shell import run_command
+from .task import task_create, task_get, task_list, task_update
 
 # edit_file 和 write_file 标记 sequential=True：同一轮里的多个改文件调用必须串行执行，
 # 否则它们会基于同一份旧快照并发写盘、互相覆盖（这正是 readFileState + mtime 想防住的并发问题）
@@ -22,6 +23,10 @@ TOOLS = [
     Tool(write_file, sequential=True),
     run_command,
     ask_user_question,
+    task_create,
+    task_list,
+    task_get,
+    task_update,
 ]
 
 __all__ = ["TOOLS", "read_and_register"]

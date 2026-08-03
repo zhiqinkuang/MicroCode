@@ -1,8 +1,11 @@
 import asyncio
+import re
 import time
+from html import escape as html_escape
 
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import InMemoryHistory
@@ -16,13 +19,37 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.markup import escape
 
 import permissions
-from mentions import AtFileCompleter
+from mentions import list_candidate_files
 from .render import console
 
 # 常驻输入区：输入框整个会话期间挂在屏幕底部不消失，Agent 输出通过 patch_stdout 打印在它上方，请求期间按 ESC / Ctrl+C 能立刻打断。
 
 # working 指示器的转圈动画帧
 _SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+
+# task 面板每行的渲染模板，键是 task.status，值里的 {s} 是 escape 后的 subject
+_TASK_ROW_TEMPLATES = {
+    "completed": "  <ansigreen>✔</ansigreen> <s><ansibrightblack>{s}</ansibrightblack></s>",
+    "in_progress": "  <ansiyellow>▶</ansiyellow> <b>{s}</b>",
+    "pending": "  <ansibrightblack>☐ {s}</ansibrightblack>",
+}
+
+
+class AtFileCompleter(Completer):
+    """
+    @ 引用补全：用户正在输入 @token 时，把匹配的文件列成下拉候选。
+    """
+    def get_completions(self, document, complete_event):
+        # 只看光标前的文本，匹配正在输入的那个 @token（@ 到光标之间的非空白串）
+        match = re.search(r"@(\S*)$", document.text_before_cursor)
+        if match is None:
+            return
+        token = match.group(1).lower()
+        for path in list_candidate_files():
+            # 简单的子串模糊匹配：token 是路径的子串就算命中，不区分大小写
+            if token in path.lower():
+                # start_position 取负的 token 长度，选中后用完整路径替换掉已经敲进去的那部分
+                yield Completion(path, start_position=-len(match.group(1)))
 
 
 class Repl:
@@ -49,6 +76,14 @@ class Repl:
     def _prompt_prefix(self, line_number, wrap_count):
         return HTML("<ansicyan>❯ </ansicyan>")
 
+    def _task_lines(self):
+        # 每次 spinner tick (~100ms) 都会调到这里，store 已经把 list() 做成内存命中，所以贴着改贴着画也不肉痛
+        tasks = self.state.tasks_store.list()
+        if not tasks:
+            return HTML("")
+        rows = [_TASK_ROW_TEMPLATES[t.status].format(s=html_escape(t.subject)) for t in tasks]
+        return HTML("\n".join(rows))
+
     def _working_line(self):
         # 输入框上方那行：转圈帧 + 已耗时 + 打断提示，只在请求期间显示
         frame = _SPINNER[self._frame % len(_SPINNER)]
@@ -65,12 +100,22 @@ class Repl:
         return Window(height=1, char="─", style="fg:ansibrightblack")
 
     def _build_app(self):
-        # 从上到下：working 指示器、分割线、输入行、分割线、模式行
+        # 从上到下：working 指示器（请求中才显示）、task 面板（有 task 才显示）、分割线、输入行、分割线、模式行
         body = HSplit(
             [
+                # working 指示器排在最上面，task 面板紧贴它下方，整组贴着输入框上方分割线
                 ConditionalContainer(
                     Window(FormattedTextControl(self._working_line), height=1),
                     filter=Condition(lambda: self.working),
+                ),
+                # task 面板按内容自适应高度，列表空时 ConditionalContainer 直接塌成 0 行不占地方，不需要手动开关
+                ConditionalContainer(
+                    Window(
+                        FormattedTextControl(self._task_lines),
+                        height=Dimension(min=0),
+                        dont_extend_height=True,
+                    ),
+                    filter=Condition(lambda: len(self.state.tasks_store.list()) > 0),
                 ),
                 self._divider(),
                 # 输入行只占内容高度，多行自动换行撑开
@@ -85,14 +130,20 @@ class Repl:
                 Window(FormattedTextControl(self._mode_line), height=1),
             ]
         )
-        # FloatContainer 承载补全菜单浮层：@ 补全候选会跟在光标下方弹出
-        root = FloatContainer(
-            content=body,
-            floats=[
-                Float(xcursor=True, ycursor=True, content=CompletionsMenu()),
-            ],
+        # 用 FloatContainer 托起输入区，再叠一层补全菜单浮层，菜单跟着光标位置浮现
+        layout = Layout(
+            FloatContainer(
+                content=body,
+                floats=[
+                    Float(
+                        xcursor=True,
+                        ycursor=True,
+                        content=CompletionsMenu(max_height=8, scroll_offset=1),
+                    ),
+                ],
+            )
         )
-        return Application(layout=Layout(root), key_bindings=self._build_key_bindings())
+        return Application(layout=layout, key_bindings=self._build_key_bindings())
 
     def _build_key_bindings(self):
         kb = KeyBindings()
@@ -131,16 +182,12 @@ class Repl:
         return kb
 
     def _on_enter(self):
+        # 补全菜单正开着且有高亮项时，回车先采纳补全，不提交输入
+        if self._buffer.complete_state and self._buffer.complete_state.current_completion:
+            self._buffer.apply_completion(self._buffer.complete_state.current_completion)
+            return
         # 请求中不接受新提交（输入框仍在，只是回车不触发新一轮）
         if self._task is not None:
-            return
-        # 补全菜单开着时，Enter 先应用补全项，不提交，让用户继续打后续文字
-        # 比如 @ment + Enter -> @mentions.py，光标停在末尾，还能接着敲 " 帮我看看"
-        state = self._buffer.complete_state
-        if state and state.completions:
-            # 选中了具体项就应用那个；没选中（complete_index 是 None）就应用第一个
-            completion = state.current_completion or state.completions[0]
-            self._buffer.apply_completion(completion)
             return
         text = self._buffer.text.strip()
         if not text:

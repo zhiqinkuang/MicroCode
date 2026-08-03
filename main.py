@@ -4,6 +4,7 @@ from pydantic_ai import Agent
 from pydantic_graph import End
 import session
 from agent import agent, MODEL_NAME, api_call_log
+from agent.deps import AgentDeps
 from UI.input_ui import Repl
 from UI.commands import (
     COMMANDS,
@@ -45,7 +46,9 @@ async def run_agent_loop(user_input, state):
     """
     api_call_log.clear()
 
-    async with agent.iter(user_input, message_history=state.history,deps=state.read_file_state) as run:
+    # deps 把 read_file_state 和 tasks_store 打包成 AgentDeps 注入：file 工具取 .read_file_state，task 工具取 .tasks_store，hooks 也从同一个 deps 读两边状态
+    deps = AgentDeps(read_file_state=state.read_file_state, tasks_store=state.tasks_store)
+    async with agent.iter(user_input, message_history=state.history, deps=deps) as run:
         node = run.next_node
 
         while not isinstance(node, End):
