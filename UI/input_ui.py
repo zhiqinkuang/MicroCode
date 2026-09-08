@@ -182,9 +182,11 @@ class Repl:
         return kb
 
     def _on_enter(self):
-        # 补全菜单正开着且有高亮项时，回车先采纳补全，不提交输入
-        if self._buffer.complete_state and self._buffer.complete_state.current_completion:
-            self._buffer.apply_completion(self._buffer.complete_state.current_completion)
+        # 补全菜单开着时，回车采纳补全：优先当前高亮项；complete_while_typing 打开的菜单默认不高亮，
+        # 没高亮就采纳第一项，否则回车会直接提交、选不了 @ 补全
+        cs = self._buffer.complete_state
+        if cs and cs.completions:
+            self._buffer.apply_completion(cs.current_completion or cs.completions[0])
             return
         # 请求中不接受新提交（输入框仍在，只是回车不触发新一轮）
         if self._task is not None:
@@ -220,6 +222,10 @@ class Repl:
         finally:
             self._task = None
             self.working = False
+            # /rewind 回退对话后会留下待回填的原 prompt，塞回输入框供用户改改重发
+            if self.state.pending_input:
+                self._buffer.text = self.state.pending_input
+                self.state.pending_input = ""
             self.app.invalidate()
 
     def start_working(self):

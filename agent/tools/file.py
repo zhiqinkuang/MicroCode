@@ -1,11 +1,8 @@
 """
 文件工具：read_file / edit_file / write_file，共享 ReadFileState 做先读后写约束。
 """
-import subprocess
-import re
 import os
-import permissions
-from pydantic_ai import RunContext, Tool
+from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelRetry
 from ..deps import AgentDeps
 from ..file_state import ReadFileState
@@ -106,7 +103,8 @@ def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string
         raise ModelRetry("old_string 和 new_string 完全相同，这次编辑没有任何改动")
 
     # 2. 先读后写：没在 readFileState 里登记过，说明还没读就想改，打回让它先读
-    record = ctx.deps.read_file_state.get(path)
+    state = ctx.deps.read_file_state
+    record = state.get(path)
     if record is None:
         raise ModelRetry(f"还没读过 {path}，请先用 read_file 读取它，再基于真实内容编辑")
 
@@ -138,10 +136,14 @@ def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string
     else:
         updated = content.replace(old_string, new_string, 1)
 
-    # 7. 整体写回磁盘，再用新内容和新 mtime 刷新登记
+    # 7. 写盘之前把改动前的内容备份进文件检查点，/rewind 才有得恢复
+    if ctx.deps.file_history:
+        ctx.deps.file_history.track_edit(path)
+
+    # 8. 整体写回磁盘，再用新内容和新 mtime 刷新登记
     with open(path, "w", encoding="utf-8") as f:
         f.write(updated)
-    ctx.deps.read_file_state.record(path, updated)
+    state.record(path, updated)
     return f"已编辑 {path}（替换 {count if replace_all else 1} 处）"
 
 
@@ -152,12 +154,16 @@ def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
     修改已有文件优先用 edit_file（只传改动片段，省 token），write_file 只用于新建文件或整体重写。
     """
     # 覆盖已有文件：沿用 edit_file 那套先读后写约束，防止整体覆盖掉没读过的内容
+    state = ctx.deps.read_file_state
     if os.path.exists(path):
-        record = ctx.deps.read_file_state.get(path)
+        record = state.get(path)
         if record is None:
             raise ModelRetry(f"{path} 已存在，覆盖前请先用 read_file 读一遍，确认不会误删内容")
         if os.path.getmtime(path) > record["timestamp"]:
             raise ModelRetry(f"{path} 在你读取之后被改动过，请重新 read_file 再覆盖")
+    # 写盘之前把改动前的状态备份进文件检查点
+    if ctx.deps.file_history:
+        ctx.deps.file_history.track_edit(path)
     try:
         with open(path, "w", encoding="utf-8") as f:
             f.write(content)
@@ -168,5 +174,5 @@ def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
     except OSError as e:
         return f"错误：写入 {path} 失败 ({e})"
     # 新写入的内容同样登记进 readFileState，后续要再改就不必重读
-    ctx.deps.read_file_state.record(path, content)
+    state.record(path, content)
     return f"已写入 {path}"

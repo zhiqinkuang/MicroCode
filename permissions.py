@@ -10,6 +10,9 @@ from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
+# 记忆目录内的写操作自动放行：记忆系统约定模型随时保存记忆，default 模式也不弹审批
+from memory import store
+
 
 # 三种权限模式
 # default：写文件、跑命令要授权，读文件等只读操作自动放行
@@ -71,6 +74,9 @@ def compute_decision(tool_name: str, args: dict) -> str:
         return "allow"
     # 只读工具：任何模式都自动放行
     if tool_name in READONLY_TOOLS:
+        return "allow"
+    # 写入落在记忆目录内：记忆系统约定模型随时保存记忆，任何模式都自动放行
+    if tool_name in EDIT_TOOLS and store.is_memory_path(str(args.get("path", ""))):
         return "allow"
     # acceptEdits 模式：编辑文件放行，命令等其他工具仍要审批
     if state.mode == ACCEPT_EDITS and tool_name in EDIT_TOOLS:

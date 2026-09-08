@@ -44,3 +44,15 @@ class ReadFileState:
         取出一个文件的登记，从没读过就返回 None。
         """
         return self._state.get(os.path.abspath(path))
+    def paths(self) -> list[str]:
+        """
+        所有登记过的绝对路径，按首次读取顺序排列。
+        """
+        return list(self._state)
+    def invalidate(self, path: str) -> None:
+        """
+        丢掉一个文件的登记：/rewind 把文件恢复成旧版本后调用，强制下次 edit 前重新 read_file。
+        rewind_files 用 copy2 带回备份的旧 mtime，可能让 edit_file 的 mtime 检查漏掉变化，
+        清掉登记最稳妥——没登记就会被「先读后写」约束打回重读。
+        """
+        self._state.pop(os.path.abspath(path), None)

@@ -369,7 +369,8 @@ class _Picker:
         Esc：文本输入模式下丢弃输入回到选择态；否则取消整个对话框。
         """
         import sys
-        sys.stderr.write(f"DEBUG _on_escape: in_text_input={self.in_text_input}\n"); sys.stderr.flush()
+        sys.stderr.write(f"DEBUG _on_escape: in_text_input={self.in_text_input}\n")
+        sys.stderr.flush()
         if self.in_text_input:
             self.in_text_input = False
             self.text_buffer.text = ""
@@ -469,7 +470,8 @@ class _Picker:
         """
         submitted = await self.app.run_async()
         import sys
-        sys.stderr.write(f"DEBUG picker.run: submitted={submitted} cancelled={self.cancelled}\n"); sys.stderr.flush()
+        sys.stderr.write(f"DEBUG picker.run: submitted={submitted} cancelled={self.cancelled}\n")
+        sys.stderr.flush()
         if self.cancelled or not submitted:
             return None
         return {
@@ -505,7 +507,8 @@ async def ask_user_question(questions: list[Question]) -> str:
 
     if answers is None:
         import sys
-        sys.stderr.write("DEBUG ask_user_question: answers is None, returning cancel string\n"); sys.stderr.flush()
+        sys.stderr.write("DEBUG ask_user_question: answers is None, returning cancel string\n")
+        sys.stderr.flush()
         return "用户取消了提问，未提供任何回答。请等待用户进一步指示，不要自作主张。"
 
     # 拼成自然语言喂回模型，对齐 CC mapToolResultToToolResultBlockParam 的格式

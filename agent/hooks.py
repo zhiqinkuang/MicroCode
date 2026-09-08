@@ -13,7 +13,6 @@ from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 import permissions
 import classifier
-from .file_state import ReadFileState
 from .reminders import build_reminder_text, build_task_reminder_text
 import dataclasses
 @dataclass
