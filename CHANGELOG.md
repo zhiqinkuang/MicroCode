@@ -6,11 +6,18 @@
 
 ### Added
 
+- 后台 `run_agent`：内置 explore / general、自定义项目级 agent、独立上下文与最终报告通知。
+- `/agents` 类型清单、分类后台任务计数、子代理审批冒泡和离线回归测试。
 - `auto` 权限模式：`ask` 的工具调用先交给旁路 LLM classifier 判定能否自动放行，classifier 拦截或出错时回退人工审批（fail-closed）。
 - `classifier.py`：把对话历史投影成防注入转写，调用 DeepSeek 裁决单次工具调用。转写只保留用户原话和工具调用，丢弃模型文本和工具输出；参数值超长截断防撑爆。
 
 ### Fixed
 
+- 子代理取消后移除失效审批；审批窗口期间暂停后台通知触发的新对话。
+- 切换会话和退出等待后台任务清理；清空会话级权限白名单，已终止任务保持 killed 状态。
+- 自定义 agent 工具名校验，避免配置和实际可用工具不一致。
+- 补充 `questionary` 运行依赖和 `pytest` 开发依赖。
+- 包源与现有锁文件统一为阿里云镜像，并更新依赖锁文件。
 - 修复 `agent/core.py` 因 `load_dotenv()` 无参调用导致 `.env` 无法加载、程序无法启动的问题。
   现使用绝对路径 `Path(__file__).parent / ".env"` 加载。
 - 修正 DeepSeek 模型名：从无效的 `deepseek-chat` 改为 `deepseek-v4-flash`

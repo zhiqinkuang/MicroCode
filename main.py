@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import compact
+import permissions
 from pydantic_ai import Agent
 from pydantic_graph import End
+from prompt_toolkit.application.current import set_app
 import session
 import mcp_servers
 # 长期记忆三件套：store 建目录、recall 每轮前召回、background 每轮后提炼 + 退出收尾
@@ -9,14 +12,18 @@ from memory import store as memory_store, recall as memory_recall, background as
 from agent import agent, MODEL_NAME, api_call_log
 from agent.deps import AgentDeps
 from UI.input_ui import Repl
+from UI.render import print_welcome_banner
 from UI.commands import (
     COMMANDS,
     SessionState,
     console,
     print_part,
-    print_welcome_banner,
 )
 from mentions import build_mention_messages, extract_at_mentions
+from agent.reminders import build_job_reminder_text
+import subagents
+
+logger = logging.getLogger(__name__)
 
 # 识别用户输入的指令
 async def handle_command(user_input, state):
@@ -52,11 +59,12 @@ async def run_agent_loop(user_input, state):
     """
     api_call_log.clear()
 
-    # deps 把 read_file_state / tasks_store / file_history 打包成 AgentDeps 注入：file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点），task 工具取 .tasks_store，hooks 也从同一个 deps 读状态
+    # deps 把 read_file_state / tasks_store / file_history / job_registry 打包成 AgentDeps 注入：file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点），task 工具取 .tasks_store，shell 工具取 .job_registry，hooks 也从同一个 deps 读状态
     deps = AgentDeps(
         read_file_state=state.read_file_state,
         tasks_store=state.tasks_store,
         file_history=state.file_history,
+        job_registry=state.job_registry,
     )
     async with agent.iter(user_input, message_history=state.history, deps=deps,toolsets=mcp_servers.active_toolsets(),) as run:
         node = run.next_node
@@ -106,7 +114,54 @@ def inject_at_mentions(user_input, state):
         for part in msg.parts:
             print_part(part)
 
+async def watch_jobs(repl, state):
+    """
+    每秒扫一次注册表：程序空闲且攒着未通知的完成 job 时，
+    把通知文本作为系统输入提交，激活 Agent 循环（和用户手动发一条消息的效果类似）。
+    """
+    while True:
+        await asyncio.sleep(1)
+        if not repl.is_idle:
+            continue
+        text = build_job_reminder_text(state.job_registry)
+        if text:
+            repl.submit_system(text)
+
+async def watch_approvals(repl):
+    """
+    盯 sub agent 冒泡上来的审批队列：用户空闲（主 agent 这轮干完、输入框等输入）时才弹窗，
+    不按 sub agent 的随机节奏打断用户手头的事。
+    """
+    while True:
+        await asyncio.sleep(0.5)
+        if not repl.is_idle:
+            continue
+        req = subagents.pop_pending_approval()
+        if req is None:
+            continue
+        repl.approval_active = True
+        try:
+            # watcher 在 REPL 启动前创建，没有继承 Application 的上下文。
+            # 显式绑定后 in_terminal() 才会暂停真实输入框并交出终端。
+            with set_app(repl.app):
+                choice = await permissions.prompt_approval(
+                    req.tool_name, req.args,
+                    requester=f"sub agent「{req.job.description}」（job {req.job.id}）请求：",
+                )
+            if not req.future.done():
+                req.future.set_result(choice)
+        finally:
+            repl.approval_active = False
+            if not req.future.done():
+                req.future.cancel()
+
 async def main():
+    from rich.logging import RichHandler
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(message)s",
+        handlers=[RichHandler(console=console, show_time=False, show_path=False)],
+    )
     sid = session.new_session_id()
     # file_history 在 SessionState.__post_init__ 里按 session_id 建好，第一轮用户输入就会 make_checkpoint，/rewind 一开始就有得回退
     state = SessionState(
@@ -123,7 +178,17 @@ async def main():
     if summary:
         console.print(summary)
 
+    # 加载 .my-claude-code/agents/ 下的自定义 sub agent，和内置类型一起进动态类型清单
+    custom = subagents.load_custom_agents()
+    if custom:
+        logger.info("已加载 %s 个自定义 sub agent（/agents 查看）", custom)
+
     repl = Repl(state)
+
+    # 常驻协程盯后台 job：Agent 闲着等输入时，完成的 job 也能推通知激活下一轮
+    jobs_watcher = asyncio.ensure_future(watch_jobs(repl, state))
+    # 常驻协程盯 sub agent 冒泡上来的审批：用户空闲时才弹窗
+    approvals_watcher = asyncio.ensure_future(watch_approvals(repl))
 
     async def on_submit(text):
         # / 开头：先尝试当作命令解析；未命中的命令原样当作普通输入交给 Agent
@@ -157,8 +222,15 @@ async def main():
     try:
         await repl.run(on_submit)
     finally:
-        # 先等在途的后台记忆任务收尾（可能正在写记忆文件），再断开 MCP 连接
+        # 停掉空闲轮询，等在途的后台记忆任务收尾（可能正在写记忆文件），
+        # 终止本会话还在跑的后台 job（避免进程泄露），最后断开 MCP 连接
+        jobs_watcher.cancel()
+        approvals_watcher.cancel()
+        await asyncio.gather(jobs_watcher, approvals_watcher, return_exceptions=True)
+        killed = await state.job_registry.aclose()
         await memory_background.drain()
+        if killed:
+            console.print(f"已终止 {killed} 个仍在运行的后台 job")
         await mcp_servers.shutdown()
 
 

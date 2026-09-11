@@ -6,35 +6,17 @@ import platform
 from pathlib import Path
 from datetime import date
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
 
 from .hooks import hooks
 from .tools import TOOLS
+# subagents 模块级 import：core 只在 project_context（每次请求时）取类型清单，
+# import 顺序上它不反向依赖 core，不会循环
+import subagents
+# model 实例化拆去了 .model（subagent 也要用同一个 model，从 core 反向 import 会循环）
+from .model import model
 # 长期记忆：instructions 是静态约定（拼在主指令末尾），store 在 project_context 里每轮注入 MEMORY.md 索引
 from memory.instructions import MEMORY_INSTRUCTIONS
 from memory import store
-from dotenv import load_dotenv
-
-# .env 跟 core.py 同目录（agent/），用绝对路径避免 CWD 不同导致加载失败
-load_dotenv(Path(__file__).parent / ".env")
-
-# 从环境变量读取 API Key
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not API_KEY:
-    raise RuntimeError("请先在 agent/.env 中设置 DEEPSEEK_API_KEY")
-
-# 从 .env 读取模型名，默认 deepseek-v4-flash
-MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
-# 从 .env 读取 API 端点，默认 DeepSeek 官方；可改成中转/镜像
-API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-
-# DeepSeek API 兼容 OpenAI 协议，用 OpenAIProvider 才能把 DEEPSEEK_API_BASE 真正传进去
-# （DeepSeekProvider 不接受 base_url，会忽略自定义端点）
-model = OpenAIChatModel(
-    MODEL_NAME,
-    provider=OpenAIProvider(base_url=API_BASE, api_key=API_KEY),
-)
 
 INSTRUCTIONS = (
     "你是一个编程助手。你可以读写文件和执行命令来帮用户完成编程任务。\n"
@@ -50,6 +32,17 @@ INSTRUCTIONS = (
     "先用 task_create 把分解出来的步骤建成 pending task，"
     "开工前用 task_update 把要做的那条切到 in_progress，做完切 completed。"
     "若任务琐碎（1-2 步、纯对话、纯查询），不要建 task。"
+    "长驻或耗时命令（dev server、长测试）用 run_command 的 run_in_background=True "
+    "放到后台执行——只在不需要立刻拿到结果时使用，命令末尾不需要加 &。"
+    "后台 job 结束后你会收到 <task-notification> 通知，所以不要主动轮询等待；"
+    "期间可以用 read_file 读它的日志文件查看已有输出，也可以用 job_kill 提前终止。"
+    "只要结论、不要过程的任务用 run_agent 交给 sub agent 去做："
+    "探索性的代码搜索、独立性强的子任务、需要第二意见的代码审查。"
+    "sub agent 从空白上下文开始工作，任务背景要在 prompt 里交代完整；"
+    "它的报告只有你能看到，需要转述给用户。"
+    "sub agent 一律在后台运行：派出后不要轮询等待，完成通知会附带报告，"
+    "没有别的事就先结束本轮。相互独立的任务可以一次派出多个 sub agent 同时干活。"
+    "一两次工具调用就能搞定的简单任务不要派 sub agent。"
 ) + MEMORY_INSTRUCTIONS
 
 agent = Agent(
@@ -106,5 +99,13 @@ def project_context() -> str:
         parts.append("")
         parts.append("# 长期记忆索引\n以下是你的记忆清单（MEMORY.md），详情见各记忆文件：")
         parts.append(memory_index)
+
+    # run_agent 可用类型清单：自定义 agent 启动时才加载完，所以动态注入而不是写死
+    agent_types = subagents.list_agent_types()
+    if agent_types:
+        parts.append("")
+        parts.append("run_agent 可用的 agent 类型：")
+        for t in agent_types:
+            parts.append(f"- {t.name}：{t.description}（可用工具：{', '.join(t.tool_names)}）")
 
     return "\n".join(parts)

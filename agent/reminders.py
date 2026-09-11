@@ -1,6 +1,7 @@
 """
-system-reminder 正文构造。真正的注入在 agent/hooks.py 里挂 hook。
+system-reminder / task-notification 正文构造。真正的注入在 agent/hooks.py 里挂 hook。
 """
+from background_jobs import JobRegistry
 from tasks_store import TasksStore
 
 from .file_state import ReadFileState
@@ -42,3 +43,28 @@ def build_task_reminder_text(store: TasksStore) -> str:
         for t in tasks:
             lines.append(f"#{t.id}. [{t.status}] {t.subject}")
     return _wrap(lines)
+
+
+def build_job_reminder_text(registry: JobRegistry) -> str | None:
+    """
+    拼出后台 job 完成的通知正文，每条包在 <task-notification> 标签里。
+    五个字段给足信息，模型拿到不用反问，直接决定下一步。
+    """
+    jobs = registry.pop_unnotified()
+    if not jobs:
+        return None
+    blocks = []
+    for job in jobs:
+        # agent 型 job 会填 result（最终报告），直接随通知附上，主 agent 不必再读日志
+        result = f"<result>{job.result}</result>\n" if job.result else ""
+        blocks.append(
+            "<task-notification>\n"
+            f"<task-id>{job.id}</task-id>\n"
+            f"<task-type>{job.kind}</task-type>\n"
+            f"<output-file>{job.log_path}</output-file>\n"
+            f"<status>{job.status}</status>\n"
+            f"<summary>{job.summary()}，可用 read_file 读输出文件</summary>\n"
+            f"{result}"
+            "</task-notification>"
+        )
+    return "\n\n".join(blocks)

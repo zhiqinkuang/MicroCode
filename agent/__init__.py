@@ -8,7 +8,8 @@
 
 子模块（tools / hooks / core）是实现细节，不需要直接 import。
 """
-from .core import agent, MODEL_NAME
+from .core import agent
+from .model import MODEL_NAME
 from .hooks import api_call_log, ApiCall
 
 __all__ = ["agent", "MODEL_NAME", "api_call_log", "ApiCall"]

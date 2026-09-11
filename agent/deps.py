@@ -1,8 +1,9 @@
 """
-Agent 复合依赖：现在 agent 同时需要 ReadFileState（给文件工具用）和 TasksStore（给 task 工具用），把它们包成一个对象，统一通过 RunContext 注入。
+Agent 复合依赖：把各工具需要的状态打包成一个对象，统一通过 RunContext 注入。
 """
 from dataclasses import dataclass
 
+from background_jobs import Job, JobRegistry
 from tasks_store import TasksStore
 
 from .file_state import ReadFileState
@@ -11,5 +12,9 @@ from file_history import FileHistory
 @dataclass
 class AgentDeps:
     read_file_state: ReadFileState
-    tasks_store: TasksStore
+    tasks_store: TasksStore | None
     file_history: FileHistory | None = None
+    # 后台任务注册表：run_command / run_agent / job_kill 共用
+    job_registry: JobRegistry | None = None
+    # sub agent 运行时指向它自己对应的 job：审批冒泡时要告诉用户是哪个 sub agent 在请求
+    subagent_job: Job | None = None

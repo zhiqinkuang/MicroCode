@@ -61,6 +61,8 @@ class Repl:
         self._on_submit = None
         # 当前处理输入的后台任务，ESC / Ctrl+C 据此打断；None 表示空闲
         self._task = None
+        # 后台子代理审批期间占用输入区，完成通知不能同时启动主 Agent。
+        self.approval_active = False
         # 是否正在请求模型，决定上方 working... 指示器的显隐
         self.working = False
         self._work_start = 0.0
@@ -91,9 +93,18 @@ class Repl:
         return HTML(f"<ansigreen>{frame}</ansigreen> <b>Working…</b><ansibrightblack>（已耗时 {elapsed}s · 按 esc 打断）</ansibrightblack>")
 
     def _mode_line(self):
-        # 输入框下方那行：当前权限模式 + 切换提示
+        # 输入框下方那行：当前权限模式 + 后台 job 计数 + 切换提示
         mode = permissions.state.mode
-        return HTML(f"  <ansimagenta><b>▶▶ {mode}</b></ansimagenta><ansibrightblack>（Shift+Tab 切换）</ansibrightblack>")
+        line = f"  <ansimagenta><b>▶▶ {mode}</b></ansimagenta><ansibrightblack>（Shift+Tab 切换）</ansibrightblack>"
+        running = self.state.job_registry.running() if self.state.job_registry else []
+        counts = {}
+        for job in running:
+            if job.background:
+                counts[job.kind] = counts.get(job.kind, 0) + 1
+        if counts:
+            summary = " · ".join(f"{count} {html_escape(kind)}" for kind, count in sorted(counts.items()))
+            line += f"  <ansicyan>⚙ {summary}</ansicyan><ansibrightblack>（/jobs 查看）</ansibrightblack>"
+        return HTML(line)
 
     def _divider(self):
         # 一条横向分割线
@@ -179,7 +190,22 @@ class Repl:
             # 循环切换权限模式
             permissions.cycle_mode()
 
+        @kb.add("c-b")
+        def _(event):
+            # 前台 job 转后台：把注册表里正在跑的前台 job 标记 background，
+            # run_command / run_subagent 的前台等待循环发现标志变了就退出，告诉模型任务转后台了
+            moved = self.state.job_registry.to_background() if self.state.job_registry else []
+            if moved:
+                ids = ", ".join(j.id for j in moved)
+                console.print(f"[cyan]⇄ 已把前台 job {ids} 转入后台，继续运行中（/jobs 查看）[/]")
+                self.app.invalidate()
+
         return kb
+
+    @property
+    def is_idle(self) -> bool:
+        # 空闲 = 没有正在处理的输入；watch_jobs 据此判断能否用系统通知激活 Agent 循环
+        return self._task is None and not self.approval_active
 
     def _on_enter(self):
         # 补全菜单开着时，回车采纳补全：优先当前高亮项；complete_while_typing 打开的菜单默认不高亮，
@@ -189,7 +215,7 @@ class Repl:
             self._buffer.apply_completion(cs.current_completion or cs.completions[0])
             return
         # 请求中不接受新提交（输入框仍在，只是回车不触发新一轮）
-        if self._task is not None:
+        if not self.is_idle:
             return
         text = self._buffer.text.strip()
         if not text:
@@ -203,13 +229,22 @@ class Repl:
         # 把处理丢进后台任务，回车处理立刻返回，输入框继续渲染、随时能打断
         self._task = self.app.create_background_task(self._process(text))
 
-    def _echo_input(self, text):
-        # 回显刚提交的一行：上下分割线夹住 ❯ 文本，和输入框观感一致
+    def _echo_input(self, text, system: bool = False):
+        # 回显刚提交的一行：上下分割线夹住 ❯ 文本，和输入框观感一致；system=True 用 ◇ system 标注系统注入
         rule = "─" * console.width
         console.print(f"[bright_black]{rule}[/]")
-        console.print(f"[cyan]❯[/] {escape(text)}")
+        label = "[dim]◇ system[/]" if system else "[cyan]❯[/]"
+        console.print(f"{label} {escape(text)}")
         console.print(f"[bright_black]{rule}[/]")
         console.print()
+
+    def submit_system(self, text):
+        """
+        系统注入的一轮输入（后台 job 完成通知等）：效果等同用户敲了这行字，激活 Agent 循环。
+        只在空闲时调用（watch_jobs 协程已判断 is_idle）。
+        """
+        self._echo_input(text, system=True)
+        self._task = self.app.create_background_task(self._process(text))
 
     async def _process(self, text):
         # 后台任务：交给 on_submit，统一兜住打断和异常
@@ -254,8 +289,8 @@ class Repl:
         try:
             while True:
                 await asyncio.sleep(0.1)
-                if self.working:
-                    self._frame += 1
-                    self.app.invalidate()
+                self._frame += 1
+                # 空闲时也持续重绘：状态栏的后台 job 计数要在 job 起/止时及时刷新
+                self.app.invalidate()
         except asyncio.CancelledError:
             pass
