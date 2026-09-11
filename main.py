@@ -9,12 +9,12 @@ from memory import store as memory_store, recall as memory_recall, background as
 from agent import agent, MODEL_NAME, api_call_log
 from agent.deps import AgentDeps
 from UI.input_ui import Repl
+from UI.render import print_welcome_banner
 from UI.commands import (
     COMMANDS,
     SessionState,
     console,
     print_part,
-    print_welcome_banner,
 )
 from mentions import build_mention_messages, extract_at_mentions
 from agent.reminders import build_job_reminder_text

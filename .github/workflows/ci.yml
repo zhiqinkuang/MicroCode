@@ -18,4 +18,8 @@ jobs:
       - name: Lint
         run: uvx ruff check .
       - name: Syntax check
-        run: uv run python -m compileall -q agent UI memory
+        run: uv run python -m compileall -q main.py background_jobs.py agent UI memory session.py permissions.py classifier.py compact.py file_history.py mcp_servers.py mentions.py tasks_store.py
+      - name: Import check
+        # compileall 查不出 import 错误（曾漏掉 main.py 从错误模块导入 print_welcome_banner），
+        # 用假 key 做 import 级验证——model.py 只要变量非空，import 阶段不发请求
+        run: DEEPSEEK_API_KEY=ci-smoke uv run python -c "import main; from agent import agent"
