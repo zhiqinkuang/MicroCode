@@ -1,7 +1,10 @@
 import asyncio
+import logging
 import compact
+import permissions
 from pydantic_ai import Agent
 from pydantic_graph import End
+from prompt_toolkit.application.current import set_app
 import session
 import mcp_servers
 # 长期记忆三件套：store 建目录、recall 每轮前召回、background 每轮后提炼 + 退出收尾
@@ -18,6 +21,9 @@ from UI.commands import (
 )
 from mentions import build_mention_messages, extract_at_mentions
 from agent.reminders import build_job_reminder_text
+import subagents
+
+logger = logging.getLogger(__name__)
 
 # 识别用户输入的指令
 async def handle_command(user_input, state):
@@ -121,7 +127,41 @@ async def watch_jobs(repl, state):
         if text:
             repl.submit_system(text)
 
+async def watch_approvals(repl):
+    """
+    盯 sub agent 冒泡上来的审批队列：用户空闲（主 agent 这轮干完、输入框等输入）时才弹窗，
+    不按 sub agent 的随机节奏打断用户手头的事。
+    """
+    while True:
+        await asyncio.sleep(0.5)
+        if not repl.is_idle:
+            continue
+        req = subagents.pop_pending_approval()
+        if req is None:
+            continue
+        repl.approval_active = True
+        try:
+            # watcher 在 REPL 启动前创建，没有继承 Application 的上下文。
+            # 显式绑定后 in_terminal() 才会暂停真实输入框并交出终端。
+            with set_app(repl.app):
+                choice = await permissions.prompt_approval(
+                    req.tool_name, req.args,
+                    requester=f"sub agent「{req.job.description}」（job {req.job.id}）请求：",
+                )
+            if not req.future.done():
+                req.future.set_result(choice)
+        finally:
+            repl.approval_active = False
+            if not req.future.done():
+                req.future.cancel()
+
 async def main():
+    from rich.logging import RichHandler
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(message)s",
+        handlers=[RichHandler(console=console, show_time=False, show_path=False)],
+    )
     sid = session.new_session_id()
     # file_history 在 SessionState.__post_init__ 里按 session_id 建好，第一轮用户输入就会 make_checkpoint，/rewind 一开始就有得回退
     state = SessionState(
@@ -138,10 +178,17 @@ async def main():
     if summary:
         console.print(summary)
 
+    # 加载 .my-claude-code/agents/ 下的自定义 sub agent，和内置类型一起进动态类型清单
+    custom = subagents.load_custom_agents()
+    if custom:
+        logger.info("已加载 %s 个自定义 sub agent（/agents 查看）", custom)
+
     repl = Repl(state)
 
     # 常驻协程盯后台 job：Agent 闲着等输入时，完成的 job 也能推通知激活下一轮
     jobs_watcher = asyncio.ensure_future(watch_jobs(repl, state))
+    # 常驻协程盯 sub agent 冒泡上来的审批：用户空闲时才弹窗
+    approvals_watcher = asyncio.ensure_future(watch_approvals(repl))
 
     async def on_submit(text):
         # / 开头：先尝试当作命令解析；未命中的命令原样当作普通输入交给 Agent
@@ -178,8 +225,10 @@ async def main():
         # 停掉空闲轮询，等在途的后台记忆任务收尾（可能正在写记忆文件），
         # 终止本会话还在跑的后台 job（避免进程泄露），最后断开 MCP 连接
         jobs_watcher.cancel()
+        approvals_watcher.cancel()
+        await asyncio.gather(jobs_watcher, approvals_watcher, return_exceptions=True)
+        killed = await state.job_registry.aclose()
         await memory_background.drain()
-        killed = state.job_registry.shutdown()
         if killed:
             console.print(f"已终止 {killed} 个仍在运行的后台 job")
         await mcp_servers.shutdown()

@@ -55,6 +55,8 @@ def build_job_reminder_text(registry: JobRegistry) -> str | None:
         return None
     blocks = []
     for job in jobs:
+        # agent 型 job 会填 result（最终报告），直接随通知附上，主 agent 不必再读日志
+        result = f"<result>{job.result}</result>\n" if job.result else ""
         blocks.append(
             "<task-notification>\n"
             f"<task-id>{job.id}</task-id>\n"
@@ -62,6 +64,7 @@ def build_job_reminder_text(registry: JobRegistry) -> str | None:
             f"<output-file>{job.log_path}</output-file>\n"
             f"<status>{job.status}</status>\n"
             f"<summary>{job.summary()}，可用 read_file 读输出文件</summary>\n"
+            f"{result}"
             "</task-notification>"
         )
     return "\n\n".join(blocks)

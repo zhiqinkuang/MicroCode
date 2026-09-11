@@ -43,6 +43,10 @@ class Job:
     background: bool = True
     # 终止这个 job 用的回调函数，由创建方注入（shell 杀进程组，agent cancel 协程）
     kill_func: Callable[[], None] | None = None
+    # shell 忽略 SIGTERM 时，收尾阶段使用强制终止回调。
+    force_kill_func: Callable[[], None] | None = None
+    # agent 型 job 的最终报告，shell 型 job 不用（输出都在日志文件里）
+    result: str | None = None
 
     def summary(self) -> str:
         """
@@ -52,7 +56,13 @@ class Job:
         if len(desc) > 60:
             desc = desc[:60] + "..."
         if self.kind == "agent":
-            return f"subagent {self.status}：{desc}"
+            if self.status == "completed":
+                return f"sub agent「{desc}」执行成功"
+            if self.status == "failed":
+                return f"sub agent「{desc}」执行失败"
+            if self.status == "killed":
+                return f"sub agent「{desc}」被终止"
+            return f"sub agent「{desc}」运行中"
         if self.status == "completed":
             return f"命令执行成功：{desc}"
         if self.status == "failed":
@@ -75,10 +85,10 @@ def _new_job_id(kind: str) -> str:
     return _JOB_ID_PREFIXES.get(kind, "j") + "".join(random.choices(_ID_ALPHABET, k=8))
 
 
-def _kill_process_tree(pid: int) -> None:
+def _kill_process_tree(pid: int, signal_number: int = signal.SIGTERM) -> None:
     try:
         # 对整个进程组发终止信号：只杀 shell 本身的话，挂它底下的子进程会变孤儿继续跑
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        os.killpg(os.getpgid(pid), signal_number)
     except (ProcessLookupError, PermissionError):
         # 进程已退出 / 权限不足：都视作已终止，不报错
         pass
@@ -116,6 +126,7 @@ class JobRegistry:
             id=job_id, kind="shell", description=command,
             log_path=log_path, background=background,
             kill_func=lambda: _kill_process_tree(proc.pid),
+            force_kill_func=lambda: _kill_process_tree(proc.pid, signal.SIGKILL) if proc.returncode is None else None,
         )
         self._jobs[job_id] = job
         # watcher 协程盯着进程结束，负责更新 job 状态
@@ -128,50 +139,55 @@ class JobRegistry:
         """
         等进程退出，按 exit code 把 job 标成 completed 或 failed。
         """
-        returncode = await proc.wait()
-        log_file.close()
+        try:
+            returncode = await proc.wait()
+        finally:
+            log_file.close()
         # 已被人为终止的 job 保持 killed 状态，不覆盖
         if job.status == "killed":
             return
         job.returncode = returncode
         job.status = "completed" if returncode == 0 else "failed"
 
-    # ---------- agent job（subagent） ----------
+    # ---------- agent job（sub agent） ----------
 
-    def spawn_agent(
-        self,
-        description: str,
-        make_run: Callable[[Path], Awaitable],
-        background: bool = True,
-    ) -> Job:
+    async def spawn_agent(self, description: str, run: Callable[[Job], Awaitable]) -> Job:
         """
         把一个协程包装成 kind="agent" 的 job：注册表、日志、通知、/jobs 面板与 shell job 全部复用。
 
-        make_run 接收日志路径、返回待跑的协程——日志路径由注册表按 id 分配，
-        所以协程只能在拿到 job id 之后构造。终止用 asyncio.Task.cancel。
+        和 spawn_shell 结构一致，区别只在「创建的东西」变了：shell job 起的是操作系统进程，
+        agent job 起的是一个 asyncio 协程；kill_func 由终止进程树换成 task.cancel，
+        其余代码一行不用改——这正是 Job 按 kill_func 回调抽象的好处。
         """
         job_id = _new_job_id("agent")
         log_path = self._jobs_dir / f"{job_id}.log"
-        job = Job(
-            id=job_id, kind="agent", description=description,
-            log_path=log_path, background=background,
-        )
-        self._jobs[job_id] = job
-
-        async def _runner() -> None:
-            try:
-                await make_run(log_path)
-                job.status = "completed"
-            except asyncio.CancelledError:
-                job.status = "killed"
-            except Exception as e:
-                job.status = "failed"
-                with open(log_path, "a", encoding="utf-8") as f:
-                    f.write(f"\n[job 出错] {type(e).__name__}: {e}\n")
-
-        task = asyncio.create_task(_runner())
+        log_path.touch()
+        job = Job(id=job_id, kind="agent", description=description, log_path=log_path)
+        task = asyncio.create_task(run(job))
+        # agent job 的终止就是取消协程
         job.kill_func = task.cancel
+        self._jobs[job_id] = job
+        # watcher 盯着协程结束，负责更新 job 状态
+        watcher = asyncio.create_task(self._watch_agent(job, task))
+        self._watchers.add(watcher)
+        watcher.add_done_callback(self._watchers.discard)
         return job
+
+    async def _watch_agent(self, job: Job, task: asyncio.Task) -> None:
+        """
+        盯着 sub agent 协程结束，按结果把 job 标成 completed / failed / killed。
+        """
+        try:
+            await task
+            if job.status != "killed":
+                job.status = "completed"
+        except asyncio.CancelledError:
+            job.status = "killed"
+        except Exception as e:
+            if job.status != "killed":
+                job.status = "failed"
+            with open(job.log_path, "a", encoding="utf-8") as f:
+                f.write(f"\n[job 出错] {type(e).__name__}: {e}\n")
 
     # ---------- 通用 API ----------
 
@@ -226,3 +242,16 @@ class JobRegistry:
         for job in running:
             self.kill(job.id)
         return len(running)
+
+    async def aclose(self) -> int:
+        """终止任务并等待其 finally 清理完成，再交还会话控制权。"""
+        killed = self.shutdown()
+        if self._watchers:
+            watchers = tuple(self._watchers)
+            _, pending = await asyncio.wait(watchers, timeout=2)
+            if pending:
+                for job in self._jobs.values():
+                    if job.status == "killed" and job.force_kill_func:
+                        job.force_kill_func()
+                await asyncio.gather(*pending, return_exceptions=True)
+        return killed

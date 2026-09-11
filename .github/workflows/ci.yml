@@ -17,8 +17,10 @@ jobs:
         run: uv sync
       - name: Lint
         run: uvx ruff check .
+      - name: Offline functional tests
+        run: uv run pytest -q
       - name: Syntax check
-        run: uv run python -m compileall -q main.py background_jobs.py agent UI memory session.py permissions.py classifier.py compact.py file_history.py mcp_servers.py mentions.py tasks_store.py
+        run: uv run python -m compileall -q main.py subagents.py background_jobs.py agent UI memory scripts session.py permissions.py classifier.py compact.py file_history.py mcp_servers.py mentions.py tasks_store.py
       - name: Import check
         # compileall 查不出 import 错误（曾漏掉 main.py 从错误模块导入 print_welcome_banner），
         # 用假 key 做 import 级验证——model.py 只要变量非空，import 阶段不发请求

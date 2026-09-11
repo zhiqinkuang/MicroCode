@@ -2,9 +2,12 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 import compact
 import os
+import logging
+import permissions
 import re
 import session
 import mcp_servers
+import subagents
 from memory import background as memory_background, store as memory_store
 from rich.markdown import Heading, Markdown
 from rich.markup import escape
@@ -16,6 +19,8 @@ from tasks_store import TasksStore
 from file_history import FileHistory
 from background_jobs import JobRegistry
 from .render import console, print_step
+
+logger = logging.getLogger(__name__)
 
 
 class LeftAlignedHeading(Heading):
@@ -182,10 +187,12 @@ def cmd_help(state: SessionState) -> bool:
     return True
 
 
-def cmd_new(state: SessionState) -> bool:
+async def cmd_new(state: SessionState) -> bool:
     """
     开启新会话：清空历史、token 计数、API 调用记录。
     """
+    killed = await state.job_registry.aclose()
+    permissions.state.session_allowed.clear()
     state.history.clear()
     state.input_tokens = 0
     state.output_tokens = 0
@@ -201,7 +208,6 @@ def cmd_new(state: SessionState) -> bool:
     state.tasks_store = TasksStore(state.session_id)
     state.file_history = FileHistory(state.session_id)
     # 旧会话还在跑的后台 job 先终止，避免进程泄露后新会话再也管不到它们
-    killed = state.job_registry.shutdown()
     if killed:
         console.print(f"已终止旧会话 {killed} 个仍在运行的后台 job")
     state.job_registry = JobRegistry(state.session_id)
@@ -273,7 +279,10 @@ async def cmd_resume(state: SessionState) -> bool:
         return True
 
     # 还原对话历史，并把会话 ID 切换成选中的旧会话，后续消息继续追加到同一个文件
-    state.history = session.load_history(selected)
+    history = session.load_history(selected)
+    killed = await state.job_registry.aclose()
+    permissions.state.session_allowed.clear()
+    state.history = history
     state.session_id = selected
     # 从恢复的历史里回填已注入过的记忆，避免重复召回同一批记忆
     state.surfaced_memories = _resurface_memories(state.history)
@@ -281,7 +290,6 @@ async def cmd_resume(state: SessionState) -> bool:
     state.tasks_store = TasksStore(state.session_id)
     state.file_history = FileHistory(state.session_id)
     # 后台 job 注册表同样切换：旧会话还在跑的 job 先终止，避免进程泄露
-    killed = state.job_registry.shutdown()
     if killed:
         console.print(f"已终止旧会话 {killed} 个仍在运行的后台 job")
     state.job_registry = JobRegistry(state.session_id)
@@ -488,11 +496,26 @@ _JOB_STATUS_ICONS = {
 }
 
 
+def cmd_agents(state: SessionState) -> bool:
+    """
+    列出所有可用的 sub agent 类型（内置 + 项目自定义），run_agent 的 agent_type 从这里挑。
+    """
+    types = subagents.list_agent_types()
+    if not types:
+        logger.info("(没有任何可用的 sub agent 类型)")
+        return True
+    for t in types:
+        tag = "内置" if t.source == "built-in" else f"自定义：{t.source}"
+        logger.info("%s（%s）\n    %s\n    工具：%s", t.name, tag, t.description, ", ".join(t.tool_names))
+    return True
+
+
 COMMANDS = {
     "new": Command("new", "开启新会话", cmd_new),
     "status": Command("status", "显示当前会话状态", cmd_status),
     "mcp": Command("mcp", "查看 MCP server 状态和工具", cmd_mcp),
     "jobs": Command("jobs", "列出后台 job（命令/subagent）", cmd_jobs),
+    "agents": Command("agents", "列出可用的 sub agent 类型", cmd_agents),
     "api-detail": Command("api-detail", "显示最近一轮 model API 调用详情", cmd_api_detail),
     "rewind": Command("rewind", "回退到过去的检查点", cmd_rewind),
     "compact": Command("compact", "压缩上下文（可带补充指令）", cmd_compact, takes_args=True),

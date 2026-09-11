@@ -9,6 +9,9 @@ from pydantic_ai import Agent
 
 from .hooks import hooks
 from .tools import TOOLS
+# subagents 模块级 import：core 只在 project_context（每次请求时）取类型清单，
+# import 顺序上它不反向依赖 core，不会循环
+import subagents
 # model 实例化拆去了 .model（subagent 也要用同一个 model，从 core 反向 import 会循环）
 from .model import model
 # 长期记忆：instructions 是静态约定（拼在主指令末尾），store 在 project_context 里每轮注入 MEMORY.md 索引
@@ -33,10 +36,13 @@ INSTRUCTIONS = (
     "放到后台执行——只在不需要立刻拿到结果时使用，命令末尾不需要加 &。"
     "后台 job 结束后你会收到 <task-notification> 通知，所以不要主动轮询等待；"
     "期间可以用 read_file 读它的日志文件查看已有输出，也可以用 job_kill 提前终止。"
-    "遇到边界清晰的子任务（调查代码怎么工作、独立小功能的实现、代码审查），"
-    "用 run_subagent 委托给子 agent：它有独立上下文，适合中间过程多的任务，能避免污染主对话历史。"
-    "task 描述必须自包含，需要的背景和验收标准都要写进去；"
-    "需要立刻拿结果就不开后台，预计耗时长（如全库审查）可加 run_in_background=True。"
+    "只要结论、不要过程的任务用 run_agent 交给 sub agent 去做："
+    "探索性的代码搜索、独立性强的子任务、需要第二意见的代码审查。"
+    "sub agent 从空白上下文开始工作，任务背景要在 prompt 里交代完整；"
+    "它的报告只有你能看到，需要转述给用户。"
+    "sub agent 一律在后台运行：派出后不要轮询等待，完成通知会附带报告，"
+    "没有别的事就先结束本轮。相互独立的任务可以一次派出多个 sub agent 同时干活。"
+    "一两次工具调用就能搞定的简单任务不要派 sub agent。"
 ) + MEMORY_INSTRUCTIONS
 
 agent = Agent(
@@ -93,5 +99,13 @@ def project_context() -> str:
         parts.append("")
         parts.append("# 长期记忆索引\n以下是你的记忆清单（MEMORY.md），详情见各记忆文件：")
         parts.append(memory_index)
+
+    # run_agent 可用类型清单：自定义 agent 启动时才加载完，所以动态注入而不是写死
+    agent_types = subagents.list_agent_types()
+    if agent_types:
+        parts.append("")
+        parts.append("run_agent 可用的 agent 类型：")
+        for t in agent_types:
+            parts.append(f"- {t.name}：{t.description}（可用工具：{', '.join(t.tool_names)}）")
 
     return "\n".join(parts)

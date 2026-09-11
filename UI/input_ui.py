@@ -61,6 +61,8 @@ class Repl:
         self._on_submit = None
         # 当前处理输入的后台任务，ESC / Ctrl+C 据此打断；None 表示空闲
         self._task = None
+        # 后台子代理审批期间占用输入区，完成通知不能同时启动主 Agent。
+        self.approval_active = False
         # 是否正在请求模型，决定上方 working... 指示器的显隐
         self.working = False
         self._work_start = 0.0
@@ -94,9 +96,14 @@ class Repl:
         # 输入框下方那行：当前权限模式 + 后台 job 计数 + 切换提示
         mode = permissions.state.mode
         line = f"  <ansimagenta><b>▶▶ {mode}</b></ansimagenta><ansibrightblack>（Shift+Tab 切换）</ansibrightblack>"
-        running = len(self.state.job_registry.running()) if self.state.job_registry else 0
-        if running:
-            line += f"  <ansicyan>⚙ {running} 个后台 job</ansicyan><ansibrightblack>（/jobs 查看）</ansibrightblack>"
+        running = self.state.job_registry.running() if self.state.job_registry else []
+        counts = {}
+        for job in running:
+            if job.background:
+                counts[job.kind] = counts.get(job.kind, 0) + 1
+        if counts:
+            summary = " · ".join(f"{count} {html_escape(kind)}" for kind, count in sorted(counts.items()))
+            line += f"  <ansicyan>⚙ {summary}</ansicyan><ansibrightblack>（/jobs 查看）</ansibrightblack>"
         return HTML(line)
 
     def _divider(self):
@@ -198,7 +205,7 @@ class Repl:
     @property
     def is_idle(self) -> bool:
         # 空闲 = 没有正在处理的输入；watch_jobs 据此判断能否用系统通知激活 Agent 循环
-        return self._task is None
+        return self._task is None and not self.approval_active
 
     def _on_enter(self):
         # 补全菜单开着时，回车采纳补全：优先当前高亮项；complete_while_typing 打开的菜单默认不高亮，
@@ -208,7 +215,7 @@ class Repl:
             self._buffer.apply_completion(cs.current_completion or cs.completions[0])
             return
         # 请求中不接受新提交（输入框仍在，只是回车不触发新一轮）
-        if self._task is not None:
+        if not self.is_idle:
             return
         text = self._buffer.text.strip()
         if not text:
