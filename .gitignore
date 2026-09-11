@@ -31,6 +31,9 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# 本地测试脚本目录：只在本地跑，不进仓库
+test/
+
 # Secrets
 .env
 .env.*
