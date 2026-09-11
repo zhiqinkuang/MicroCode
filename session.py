@@ -52,14 +52,19 @@ def load_history(session_id: str) -> list:
 
 def first_prompt(path: Path) -> str:
     """
-    只读文件第一行，提取首条用户输入作为这个会话的摘要。
+    从会话文件头部提取首条真实用户输入作为摘要；系统注入的 <task-notification> 通知文本跳过。
     """
     with open(path, encoding="utf-8") as f:
-        head = f.readline()
-    msg = json.loads(head)
-    for part in msg.get("parts", []):
-        if part.get("part_kind") == "user-prompt":
-            return str(part.get("content", ""))
+        for line in f:
+            msg = json.loads(line)
+            for part in msg.get("parts", []):
+                if part.get("part_kind") != "user-prompt":
+                    continue
+                content = str(part.get("content", ""))
+                # 通知文本跳过，继续找首条真实用户输入
+                if content.startswith("<task-notification>"):
+                    break
+                return content
     return "(空会话)"
 
 

@@ -14,6 +14,7 @@ import questionary
 from agent.file_state import ReadFileState
 from tasks_store import TasksStore
 from file_history import FileHistory
+from background_jobs import JobRegistry
 from .render import console, print_step
 
 
@@ -55,12 +56,15 @@ class SessionState:
     file_history: FileHistory | None = field(default=None)
     # 本会话已召回注入过的记忆文件名，避免同一记忆每轮重复注入；/new 清空、/resume 从历史回填
     surfaced_memories: set = field(default_factory=set)
+    # 本会话的后台任务注册表：按 session_id 隔离日志目录，/new /resume 时换新实例
+    job_registry: JobRegistry = field(default=None)
 
     def __post_init__(self):
-        # tasks_store / file_history 都依赖 session_id，没法用 default_factory（拿不到其他字段），在 __post_init__ 里按 session_id 建
+        # tasks_store / file_history / job_registry 都依赖 session_id，没法用 default_factory（拿不到其他字段），在 __post_init__ 里按 session_id 建
         # field(default=None) 只是占位，到这里才真正赋值；/new /resume 改 session_id 后也会重建
         self.tasks_store = TasksStore(self.session_id)
         self.file_history = FileHistory(self.session_id)
+        self.job_registry = JobRegistry(self.session_id)
 
 
 @dataclass
@@ -193,9 +197,14 @@ def cmd_new(state: SessionState) -> bool:
     state.read_file_state = ReadFileState()
     # 换一个新的会话 ID，后续消息写进新文件
     state.session_id = session.new_session_id()
-    # tasks_store / file_history 按 session_id 隔离落盘，新会话用全新空 store
+    # tasks_store / file_history / job_registry 按 session_id 隔离落盘，新会话用全新空 store
     state.tasks_store = TasksStore(state.session_id)
     state.file_history = FileHistory(state.session_id)
+    # 旧会话还在跑的后台 job 先终止，避免进程泄露后新会话再也管不到它们
+    killed = state.job_registry.shutdown()
+    if killed:
+        console.print(f"已终止旧会话 {killed} 个仍在运行的后台 job")
+    state.job_registry = JobRegistry(state.session_id)
     console.print("已开启新会话\n")
     return True
 
@@ -271,6 +280,11 @@ async def cmd_resume(state: SessionState) -> bool:
     # tasks_store / file_history 按 session_id 重建：旧会话磁盘上的数据会被 __init__ 灌进内存
     state.tasks_store = TasksStore(state.session_id)
     state.file_history = FileHistory(state.session_id)
+    # 后台 job 注册表同样切换：旧会话还在跑的 job 先终止，避免进程泄露
+    killed = state.job_registry.shutdown()
+    if killed:
+        console.print(f"已终止旧会话 {killed} 个仍在运行的后台 job")
+    state.job_registry = JobRegistry(state.session_id)
 
     # jsonl 里每条模型回复都带 usage，把会话的 token 用量累加回来
     state.input_tokens = sum(
@@ -445,10 +459,40 @@ def cmd_mcp(state: SessionState) -> bool:
     return True
 
 
+def cmd_jobs(state: SessionState) -> bool:
+    """
+    列出本会话的所有 job：id、类型、状态、描述和日志路径（后台命令、subagent 共用一张表）。
+    """
+    jobs = state.job_registry.list()
+    if not jobs:
+        console.print("(本会话还没有任何 job)\n")
+        return True
+
+    for job in jobs:
+        icon = _JOB_STATUS_ICONS.get(job.status, "?")
+        desc = " ".join(job.description.split())
+        if len(desc) > 50:
+            desc = desc[:50] + "..."
+        console.print(f"{icon} [cyan]{job.id}[/] [dim]{job.kind}[/]  {escape(desc)}")
+        console.print(f"   [dim]日志：{job.log_path}[/]")
+    console.print()
+    return True
+
+
+# job 状态对应的显示图标，/jobs 面板用
+_JOB_STATUS_ICONS = {
+    "running": "[yellow]▶[/]",
+    "completed": "[green]✔[/]",
+    "failed": "[red]✘[/]",
+    "killed": "[red]⊘[/]",
+}
+
+
 COMMANDS = {
     "new": Command("new", "开启新会话", cmd_new),
     "status": Command("status", "显示当前会话状态", cmd_status),
     "mcp": Command("mcp", "查看 MCP server 状态和工具", cmd_mcp),
+    "jobs": Command("jobs", "列出后台 job（命令/subagent）", cmd_jobs),
     "api-detail": Command("api-detail", "显示最近一轮 model API 调用详情", cmd_api_detail),
     "rewind": Command("rewind", "回退到过去的检查点", cmd_rewind),
     "compact": Command("compact", "压缩上下文（可带补充指令）", cmd_compact, takes_args=True),

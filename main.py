@@ -17,6 +17,7 @@ from UI.commands import (
     print_welcome_banner,
 )
 from mentions import build_mention_messages, extract_at_mentions
+from agent.reminders import build_job_reminder_text
 
 # 识别用户输入的指令
 async def handle_command(user_input, state):
@@ -52,11 +53,12 @@ async def run_agent_loop(user_input, state):
     """
     api_call_log.clear()
 
-    # deps 把 read_file_state / tasks_store / file_history 打包成 AgentDeps 注入：file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点），task 工具取 .tasks_store，hooks 也从同一个 deps 读状态
+    # deps 把 read_file_state / tasks_store / file_history / job_registry 打包成 AgentDeps 注入：file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点），task 工具取 .tasks_store，shell 工具取 .job_registry，hooks 也从同一个 deps 读状态
     deps = AgentDeps(
         read_file_state=state.read_file_state,
         tasks_store=state.tasks_store,
         file_history=state.file_history,
+        job_registry=state.job_registry,
     )
     async with agent.iter(user_input, message_history=state.history, deps=deps,toolsets=mcp_servers.active_toolsets(),) as run:
         node = run.next_node
@@ -106,6 +108,19 @@ def inject_at_mentions(user_input, state):
         for part in msg.parts:
             print_part(part)
 
+async def watch_jobs(repl, state):
+    """
+    每秒扫一次注册表：程序空闲且攒着未通知的完成 job 时，
+    把通知文本作为系统输入提交，激活 Agent 循环（和用户手动发一条消息的效果类似）。
+    """
+    while True:
+        await asyncio.sleep(1)
+        if not repl.is_idle:
+            continue
+        text = build_job_reminder_text(state.job_registry)
+        if text:
+            repl.submit_system(text)
+
 async def main():
     sid = session.new_session_id()
     # file_history 在 SessionState.__post_init__ 里按 session_id 建好，第一轮用户输入就会 make_checkpoint，/rewind 一开始就有得回退
@@ -124,6 +139,9 @@ async def main():
         console.print(summary)
 
     repl = Repl(state)
+
+    # 常驻协程盯后台 job：Agent 闲着等输入时，完成的 job 也能推通知激活下一轮
+    jobs_watcher = asyncio.ensure_future(watch_jobs(repl, state))
 
     async def on_submit(text):
         # / 开头：先尝试当作命令解析；未命中的命令原样当作普通输入交给 Agent
@@ -157,8 +175,13 @@ async def main():
     try:
         await repl.run(on_submit)
     finally:
-        # 先等在途的后台记忆任务收尾（可能正在写记忆文件），再断开 MCP 连接
+        # 停掉空闲轮询，等在途的后台记忆任务收尾（可能正在写记忆文件），
+        # 终止本会话还在跑的后台 job（避免进程泄露），最后断开 MCP 连接
+        jobs_watcher.cancel()
         await memory_background.drain()
+        killed = state.job_registry.shutdown()
+        if killed:
+            console.print(f"已终止 {killed} 个仍在运行的后台 job")
         await mcp_servers.shutdown()
 
 

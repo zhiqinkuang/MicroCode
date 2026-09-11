@@ -1,5 +1,5 @@
 """
-工具子包：按职责拆成 file（读写文件）/ shell（执行命令）/ ask_user（向用户提问）。
+工具子包：按职责拆成 file（读写文件）/ shell（执行命令）/ ask_user（向用户提问）/ subagent（委托子任务）。
 
 外部代码只需要：
 - TOOLS: 注册给 Agent 的工具列表
@@ -12,7 +12,8 @@ from pydantic_ai import Tool
 from . import shell as _shell  # noqa: F401
 from .ask_user import ask_user_question
 from .file import read_and_register, read_file, edit_file, write_file
-from .shell import run_command
+from .shell import job_kill, run_command
+from .subagent import run_subagent
 from .task import task_create, task_get, task_list, task_update
 
 # edit_file 和 write_file 标记 sequential=True：同一轮里的多个改文件调用必须串行执行，
@@ -22,6 +23,8 @@ TOOLS = [
     Tool(edit_file, sequential=True),
     Tool(write_file, sequential=True),
     run_command,
+    job_kill,
+    run_subagent,
     ask_user_question,
     task_create,
     task_list,

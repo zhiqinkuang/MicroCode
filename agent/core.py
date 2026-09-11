@@ -6,35 +6,14 @@ import platform
 from pathlib import Path
 from datetime import date
 from pydantic_ai import Agent
-from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
 
 from .hooks import hooks
 from .tools import TOOLS
+# model 实例化拆去了 .model（subagent 也要用同一个 model，从 core 反向 import 会循环）
+from .model import model
 # 长期记忆：instructions 是静态约定（拼在主指令末尾），store 在 project_context 里每轮注入 MEMORY.md 索引
 from memory.instructions import MEMORY_INSTRUCTIONS
 from memory import store
-from dotenv import load_dotenv
-
-# .env 跟 core.py 同目录（agent/），用绝对路径避免 CWD 不同导致加载失败
-load_dotenv(Path(__file__).parent / ".env")
-
-# 从环境变量读取 API Key
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not API_KEY:
-    raise RuntimeError("请先在 agent/.env 中设置 DEEPSEEK_API_KEY")
-
-# 从 .env 读取模型名，默认 deepseek-v4-flash
-MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
-# 从 .env 读取 API 端点，默认 DeepSeek 官方；可改成中转/镜像
-API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-
-# DeepSeek API 兼容 OpenAI 协议，用 OpenAIProvider 才能把 DEEPSEEK_API_BASE 真正传进去
-# （DeepSeekProvider 不接受 base_url，会忽略自定义端点）
-model = OpenAIChatModel(
-    MODEL_NAME,
-    provider=OpenAIProvider(base_url=API_BASE, api_key=API_KEY),
-)
 
 INSTRUCTIONS = (
     "你是一个编程助手。你可以读写文件和执行命令来帮用户完成编程任务。\n"
@@ -50,6 +29,14 @@ INSTRUCTIONS = (
     "先用 task_create 把分解出来的步骤建成 pending task，"
     "开工前用 task_update 把要做的那条切到 in_progress，做完切 completed。"
     "若任务琐碎（1-2 步、纯对话、纯查询），不要建 task。"
+    "长驻或耗时命令（dev server、长测试）用 run_command 的 run_in_background=True "
+    "放到后台执行——只在不需要立刻拿到结果时使用，命令末尾不需要加 &。"
+    "后台 job 结束后你会收到 <task-notification> 通知，所以不要主动轮询等待；"
+    "期间可以用 read_file 读它的日志文件查看已有输出，也可以用 job_kill 提前终止。"
+    "遇到边界清晰的子任务（调查代码怎么工作、独立小功能的实现、代码审查），"
+    "用 run_subagent 委托给子 agent：它有独立上下文，适合中间过程多的任务，能避免污染主对话历史。"
+    "task 描述必须自包含，需要的背景和验收标准都要写进去；"
+    "需要立刻拿结果就不开后台，预计耗时长（如全库审查）可加 run_in_background=True。"
 ) + MEMORY_INSTRUCTIONS
 
 agent = Agent(

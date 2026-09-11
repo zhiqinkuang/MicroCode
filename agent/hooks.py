@@ -13,7 +13,7 @@ from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 import permissions
 import classifier
-from .reminders import build_reminder_text, build_task_reminder_text
+from .reminders import build_reminder_text, build_task_reminder_text, build_job_reminder_text
 import dataclasses
 @dataclass
 class ApiCall:
@@ -233,12 +233,19 @@ def _build_task_reminder(ctx, messages) -> str | None:
     return build_task_reminder_text(ctx.deps.tasks_store)
 
 
+def _build_job_reminder(ctx, messages) -> str | None:
+    # 后台 job 完成通知：从注册表取已结束但还没通知的 job
+    if ctx.deps.job_registry is None:
+        return None
+    return build_job_reminder_text(ctx.deps.job_registry)
+
+
 # 注册要在 before_model_request 触发的 reminder builder：每条 (sentinel, builder)，sentinel 仅用于回扫识别（task reminder 复用）
 _REMINDER_SENTINELS = {
     # task reminder 的识别串就是它正文里 builder 必定带的那句话，不再单独嵌一个 marker
     "task": "task 工具最近没有被使用",
 }
-_REMINDER_BUILDERS = (_build_file_reminder, _build_task_reminder)
+_REMINDER_BUILDERS = (_build_file_reminder, _build_task_reminder, _build_job_reminder)
 
 
 @hooks.on.before_model_request
