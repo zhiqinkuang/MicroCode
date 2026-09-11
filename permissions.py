@@ -10,6 +10,9 @@ from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
 
+# 记忆目录内的写操作自动放行：记忆系统约定模型随时保存记忆，default 模式也不弹审批
+from memory import store
+
 
 # 三种权限模式
 # default：写文件、跑命令要授权，读文件等只读操作自动放行
@@ -25,9 +28,9 @@ MODES = [DEFAULT, ACCEPT_EDITS, AUTO, BYPASS]
 
 #只读
 # 只读工具，任何模式都自动放行（读取不会改动系统，放行没风险）
-READONLY_TOOLS = {"read_file"}
+READONLY_TOOLS = {"read_file", "ask_user_question", "task_create", "task_list", "task_get", "task_update"}
 # 编辑文件类工具，acceptEdits 模式下自动放行
-EDIT_TOOLS = {"write_file"}
+EDIT_TOOLS = {"write_file", "edit_file"}
 # 工具自检注册表：通用权限规则只认工具名，但危不危险往往取决于参数，只有工具自己最懂参数的语义
 TOOL_SELF_CHECKS = {}
 
@@ -71,6 +74,9 @@ def compute_decision(tool_name: str, args: dict) -> str:
         return "allow"
     # 只读工具：任何模式都自动放行
     if tool_name in READONLY_TOOLS:
+        return "allow"
+    # 写入落在记忆目录内：记忆系统约定模型随时保存记忆，任何模式都自动放行
+    if tool_name in EDIT_TOOLS and store.is_memory_path(str(args.get("path", ""))):
         return "allow"
     # acceptEdits 模式：编辑文件放行，命令等其他工具仍要审批
     if state.mode == ACCEPT_EDITS and tool_name in EDIT_TOOLS:

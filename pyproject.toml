@@ -9,8 +9,15 @@ dependencies = [
     "prompt-toolkit>=3.0",
     "python-dotenv>=1.0",
     "rich>=13.0",
+    "typer",
 ]
 
 [[tool.uv.index]]
-url = "https://mirrors.aliyun.com/pypi/simple/"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

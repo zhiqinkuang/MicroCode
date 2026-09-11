@@ -10,8 +10,11 @@ from UI.render import console, print_step
 import asyncio
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 import permissions
 import classifier
+from .reminders import build_reminder_text, build_task_reminder_text
+import dataclasses
 @dataclass
 class ApiCall:
     """
@@ -173,3 +176,85 @@ async def _check_permission(ctx, *, call, tool_def, args, handler):
 
     # 拒绝：不执行工具，把拒绝原因回填给模型，让它停下来等用户发话，而不是自作主张绕过去
     return f"用户拒绝了对 {call.tool_name} 的调用，这次调用没有执行。请停下手上的事，等用户告诉你接下来该怎么做。"
+
+
+# 添加是否进行模型检查
+# ---------- system-reminder 注入 ----------
+
+# 4 个 task 管理工具名：扫描历史时只要看到其中任意一个，就认为模型最近「碰过」task 系统，不需要再提醒
+_TASK_MANAGEMENT_TOOLS = {"task_create", "task_list", "task_get", "task_update"}
+# 沉默够这么多轮还没碰 task 工具，才允许发一次 task reminder，避免刚建完 task 就被反复提醒
+TASK_REMINDER_TURNS_SINCE_WRITE = 3
+# 两次 task reminder 之间至少隔这么多轮，防止 reminder 自己刷屏
+TASK_REMINDER_TURNS_BETWEEN = 5
+
+
+def _scan_task_turn_counters(messages) -> tuple[int, int]:
+    """
+    一次反向扫描历史，同时算出 (距上次 task 管理工具多少轮, 距上次 task_reminder 多少轮)。两个结果都拿到就早退，避免长 history 下扫两遍。
+    """
+    since_mgmt = 0
+    since_reminder = 0
+    found_mgmt = False
+    found_reminder = False
+    for msg in reversed(messages):
+        if isinstance(msg, ModelResponse):
+            if not found_mgmt:
+                for part in msg.parts:
+                    if isinstance(part, ToolCallPart) and part.tool_name in _TASK_MANAGEMENT_TOOLS:
+                        found_mgmt = True
+                        break
+                if not found_mgmt:
+                    since_mgmt += 1
+            if not found_reminder:
+                since_reminder += 1
+        elif isinstance(msg, ModelRequest) and not found_reminder:
+            for part in msg.parts:
+                if isinstance(part, UserPromptPart) and isinstance(part.content, str) and _REMINDER_SENTINELS["task"] in part.content:
+                    found_reminder = True
+                    break
+        if found_mgmt and found_reminder:
+            break
+    return since_mgmt, since_reminder
+
+
+def _build_file_reminder(ctx, messages) -> str | None:
+    # 单次扫描的 readFileState 变更检测；只看 state，不看 messages
+    return build_reminder_text(ctx.deps.read_file_state)
+
+
+def _build_task_reminder(ctx, messages) -> str | None:
+    # task reminder 的两道阈值都过了才发：沉默够久 + 上次提醒也够久了
+    since_mgmt, since_reminder = _scan_task_turn_counters(messages)
+    if since_mgmt < TASK_REMINDER_TURNS_SINCE_WRITE:
+        return None
+    if since_reminder < TASK_REMINDER_TURNS_BETWEEN:
+        return None
+    return build_task_reminder_text(ctx.deps.tasks_store)
+
+
+# 注册要在 before_model_request 触发的 reminder builder：每条 (sentinel, builder)，sentinel 仅用于回扫识别（task reminder 复用）
+_REMINDER_SENTINELS = {
+    # task reminder 的识别串就是它正文里 builder 必定带的那句话，不再单独嵌一个 marker
+    "task": "task 工具最近没有被使用",
+}
+_REMINDER_BUILDERS = (_build_file_reminder, _build_task_reminder)
+
+
+@hooks.on.before_model_request
+async def _inject_reminders(ctx, request_context):
+    # 逐个 builder 跑一遍，收集返回的非 None 文本，拼成一条 system-reminder 注入到 messages 末尾
+    # 每个 builder 自己负责阈值判断和从 ctx.deps 取对应状态（file reminder 看 read_file_state，task reminder 看 tasks_store）
+    texts = []
+    for builder in _REMINDER_BUILDERS:
+        text = builder(ctx, request_context.messages)
+        if text:
+            texts.append(text)
+    if not texts:
+        return request_context
+
+    combined = "\n\n".join(texts)
+    reminder = ModelRequest(parts=[UserPromptPart(content=combined)])
+    new_messages = list(request_context.messages) + [reminder]
+    print_step("[dim]◇ system[/]", f"[dim]{combined[:200]}[/]")
+    return dataclasses.replace(request_context, messages=new_messages)
