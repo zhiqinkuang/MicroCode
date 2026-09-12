@@ -410,7 +410,11 @@ async def run_subagent(atype: AgentType, prompt: str, job: Job, parent_deps: Age
 
         # 记录任务结果——报告是 sub agent 唯一的输出通道
         job.result = run.result.output or "(sub agent 没有输出报告)"
+        # 记下子代理自己的用量：它不在主 agent 的 result.usage 里，
+        # 不单独落一份就会从会话累计里整块丢掉（token 类指标会因此系统性偏低）
+        job.usage = run.result.usage
         log.write(f"=== 最终报告 ===\n{job.result}\n")
+        log.write(f"=== 用量 === 输入 {job.usage.input_tokens} / 输出 {job.usage.output_tokens}\n")
         logger.info("● sub agent「%s」执行成功", job.description)
     finally:
         log.close()

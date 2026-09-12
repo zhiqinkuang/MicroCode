@@ -74,6 +74,23 @@ class SessionState:
     # 按会话持有（/new /resume 换新实例），但不落盘：闭环是运行时概念，重放历史不该复活「未验证」判定
     iteration: IterationState = field(default_factory=IterationState)
 
+    def settle_job_usage(self) -> None:
+        """
+        把已完成 job（子代理）的用量并入会话累计。幂等：注册表给每个 job 打一次标记。
+
+        为什么必须有这一步：子代理在独立上下文里跑，它的用量不在主 agent 的
+        result.usage 里，不结算就会从 /status 与任何 token 指标里整块消失——
+        而子代理恰恰是 token 大户（全新上下文要完整交代背景 + 最多 40 轮 + 最终报告）。
+        调用点：run_agent_loop 收尾时，以及每次取 job 通知时（job 可能在本轮结束后才跑完）。
+        """
+        registry = self.job_registry
+        if registry is None:
+            return
+        for job in registry.settle_usage():
+            usage = job.usage
+            self.input_tokens += getattr(usage, "input_tokens", 0) or 0
+            self.output_tokens += getattr(usage, "output_tokens", 0) or 0
+
     def __post_init__(self):
         # tasks_store / file_history / job_registry 都依赖 session_id，没法用 default_factory（拿不到其他字段），在 __post_init__ 里按 session_id 建
         # field(default=None) 只是占位，到这里才真正赋值；/new /resume 改 session_id 后也会重建

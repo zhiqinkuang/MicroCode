@@ -4,6 +4,7 @@
 """
 from dataclasses import dataclass
 import json
+import os
 from pathlib import Path
 
 from pydantic_ai.exceptions import ModelRetry
@@ -11,6 +12,12 @@ from pydantic_ai.exceptions import ModelRetry
 
 FRONTMATTER_MAX_LINES = 100
 PROJECT_SKILLS_RELATIVE_DIR = Path(".my-claude-code") / "skills"
+
+# 消融实验开关：关掉后不发现任何 Skill，等价于「没有 Skill 系统」。
+# 只在 eval 里用（见 scripts/eval/run_task.py），默认行为一个字不变。
+# 用读环境变量而不是加函数参数：调用点有三处（agent/core.py 的指令注入、main.py 的启动摘要、
+# load_skill），逐个传参会把实验开关渗透进产品签名里。
+SKILLS_DISABLED = os.environ.get("CODING_AGENT_DISABLE_SKILLS", "").strip().lower() not in ("", "0", "false")
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,8 @@ def discover_skills(
     user_skills_dir: Path | str | None = None,
 ) -> list[SkillInfo]:
     """发现个人和项目 Skill；同名时项目定义覆盖个人定义。"""
+    if SKILLS_DISABLED:
+        return []
     project_dir = Path.cwd() if cwd is None else Path(cwd)
     personal_root = (
         Path.home() / ".my-claude-code" / "skills"

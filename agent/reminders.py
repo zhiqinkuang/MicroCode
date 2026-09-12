@@ -98,6 +98,11 @@ def build_job_reminder_text(registry: JobRegistry) -> str | None:
     """
     拼出后台 job 完成的通知正文，每条包在 <task-notification> 标签里。
     五个字段给足信息，模型拿到不用反问，直接决定下一步。
+
+    注意这里**不做用量结算**：本函数只有 registry，拿不到 SessionState。
+    在这里调用 registry.settle_usage() 会把 job 标记成「已结算」而不真正累加，
+    那批用量就永久丢失了（实现过程中真的踩到过这个坑）。结算只发生在能改到
+    state 的地方：main.run_agent_loop 的两端，以及 main.watch_jobs 的空闲轮询。
     """
     jobs = registry.pop_unnotified()
     if not jobs:

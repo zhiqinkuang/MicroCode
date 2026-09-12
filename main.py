@@ -60,6 +60,8 @@ async def run_agent_loop(user_input, state, model=None):
     跑完后再把结果（history、token、API 调用元数据）同步到 state。
     """
     api_call_log.clear()
+    # 上轮结束后才跑完的子代理，它们的用量在这里被接住（收尾结算只管本轮内的）
+    state.settle_job_usage()
     # 闭环记账按「本轮用户输入」为界：清掉上一轮的编辑与验证记录，
     # 否则上一轮的欠账会压到这一轮头上。纯问答/纯查询不产生改动，闭环全程不介入
     state.iteration.clear()
@@ -110,6 +112,11 @@ async def run_agent_loop(user_input, state, model=None):
     state.output_tokens += usage.output_tokens
     state.last_api_calls = list(api_call_log)
 
+    # 结算本轮内跑完的子代理用量：它们的用量不在主 agent 的 result.usage 里，
+    # 不并入就会从累计 token 里整块消失（子代理恰是 token 大户）。
+    # 更晚跑完的 job 由取出通知时那次结算兜住——见 agent/reminders.py
+    state.settle_job_usage()
+
     # 把本轮新增消息追加到会话文件，/resume 才能读到
     if state.session_id:
         session.append_messages(state.session_id, new_messages)
@@ -158,6 +165,9 @@ async def watch_jobs(repl, state):
         await asyncio.sleep(1)
         if not repl.is_idle:
             continue
+        # 后台跑完的子代理要立刻计入累计：这里每秒一次，比等到下一轮用户输入更及时。
+        # 结算放在取通知之前，保证通知文案与 /status 的数字不会互相矛盾
+        state.settle_job_usage()
         text = build_job_reminder_text(state.job_registry)
         if text:
             repl.submit_system(text)

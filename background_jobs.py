@@ -47,6 +47,12 @@ class Job:
     force_kill_func: Callable[[], None] | None = None
     # agent 型 job 的最终报告，shell 型 job 不用（输出都在日志文件里）
     result: str | None = None
+    # agent 型 job 自己消耗的用量（pydantic-ai 的 RunUsage），由 run_subagent 填入。
+    # 子代理在独立上下文里跑，它的用量不在主 agent 的 result.usage 里，
+    # 不单独记下来就会从会话累计里整块消失（子代理恰恰是 token 大户）。
+    usage: object | None = None
+    # 该 job 的用量是否已并入会话累计：结算必须幂等，否则重复统计会把数字放大
+    usage_settled: bool = False
 
     def summary(self) -> str:
         """
@@ -223,6 +229,22 @@ class JobRegistry:
         for job in moved:
             job.background = True
         return moved
+
+    def settle_usage(self) -> list[Job]:
+        """
+        交出「已经结束、记了用量、但还没并入会话累计」的 job，并打上已结算标记。
+
+        用独立的 settle_usage 而不是复用 pop_unnotified：后者是**通知**语义
+        （取走即标记已通知），而结算时机与通知时机并不总是一致——例如本轮结束时
+        就地结算，此时通知可能还没被取走。两件事混在一个标记上会漏计或重复计。
+        """
+        settled = [
+            job for job in self._jobs.values()
+            if job.usage is not None and not job.usage_settled and job.status != "running"
+        ]
+        for job in settled:
+            job.usage_settled = True
+        return settled
 
     def pop_unnotified(self) -> list[Job]:
         """

@@ -6,6 +6,37 @@
 
 ### Added
 
+- Eval 编排器 `scripts/eval/run_matrix.py`：按「夹具 × 版本 × 重复」批量跑并产出可比较的汇总表。
+  版本定义集中在 VERSIONS 字典里（V0 基线 / V1 有 skill / V2 有 subagent / V3 全量），
+  汇总**必须给出同版本内的极差**——版本间差异若小于组内极差，就无法与模型随机性区分。
+- Eval 夹具 `tasks/order-report/`：多文件、需跨模块理解语义的订单报表任务。
+  折扣算对了但**税基取错变量**，单看 `pricing.py` 的代码形态是「对」的，
+  只有对照 README 的业务口径才能发现——用来量「探索」与「上下文隔离」，而不是一行式 bug。
+  项目内自带 `money-rules` skill 讲金额约定，供「按需加载 Skill」这条机制使用。
+- 运行器守卫：**隐藏用例一个都没被收集到**时报「运行器故障」而不是判 agent 失败。
+  两个夹具的隐藏用例路径配置也随之修正——其中一个是第一版的拷贝缺陷**恰好掩盖**的。
+- 夹具自证测试：守住「夹具基线必须失败」与「夹具必须有解」。
+  前者防的是一个会静默烧 token 的失败模式——若谁把夹具里的 bug 顺手修好，
+  基线不再失败，评测会把任务判成「无可验证起点」却仍然跑完整轮。
+- Eval 管线（`scripts/eval/`）：
+  - `run_task.py`：单任务运行器。每次运行在临时目录建隔离工作区与临时 HOME，
+    跑基线测试（必须先失败，否则任务没有可验证起点）、驱动 agent、
+    跑最终测试与**模型看不到的隐藏用例**，产出结构化运行记录。
+    记录里存的是原始事实（测试结果、文件内容快照与 diff、事件流、token），
+    判定留给纯函数，于是判定器改了可以对历史记录**复判**而不必重跑。
+  - `judge.py`：纯粹的判定器（只读记录、不执行任何东西、不看当前文件系统）。
+    判据：基线必须失败 → 最终测试通过 → **只读白名单未被改动** → 白名单内改动 →
+    测试收集数未减少 → diff 里无跳过/恒真手法 → 隐藏用例通过。
+    用白名单而不是「列举作弊手法」：漏掉一种手法等于放行，漏掉一条白名单只是误杀。
+  - `tasks/example-fix-addition/`：演示夹具，同时是 CI 里的端到端测试素材。
+- 三个**消融实验开关**（默认全关，产品默认行为一字不变）：
+  `CODING_AGENT_DISABLE_SKILLS`、`CODING_AGENT_DISABLE_SUBAGENTS`，
+  以及运行器的 `--permission-mode`。用于把「全量 vs 基线」拆成各机制的独立贡献。
+- `tests/test_eval_pipeline.py`：28 项离线测试。含判定器对十类标注样本的
+  **零误判门禁**（含改测试、删测试、跳过、硬编码、改判定配置等作弊手法），
+  以及一条跑完整条链路的端到端用例。
+- `tests/test_token_usage.py`：子代理 token 计量的 7 项离线回归（记在 job 上、并入累计、
+  重复结算不重复计入、注册表结算契约、晚跑完的子代理由下一轮兜住、收尾结算兜底）。
 - `tests/test_hardening_e2e.py`：加固相关的完整离线测试（45 项）。含三条真实端到端链路——
   ① 主 agent 经真实 `run_agent → JobRegistry.spawn_agent → run_subagent` 派发 explore，
   断言只读子代理没写出任何文件、报告回流进 `job.result`；② 同链路的 general 反向对照（必须写出）；
@@ -33,6 +64,16 @@
 
 ### Fixed
 
+- **子代理的 token 用量完全没被计入**：`main.py` 只把主 agent 的 `result.usage` 累加进
+  `SessionState`，而子代理在 `run_subagent` 里独立跑，它的用量既不入 job 也不入会话累计，
+  `/status` 看到的一直是偏低的数字。子代理恰是 token 大户（全新上下文要完整交代背景 +
+  最多 40 轮 + 最终报告），所以任何用过 `run_agent` 的一轮，token 统计都系统性偏低。
+  现在 `run_subagent` 把用量记进 `job.usage`，`SessionState.settle_job_usage()` 幂等地
+  并入累计（`job.usage_settled` 保证只并一次）。
+  **结算只发生在能改到 `state` 的地方**：`run_agent_loop` 的首尾与 `watch_jobs` 的空闲轮询。
+  刻意不在 `build_job_reminder_text` 里结算——那个函数只有 registry、拿不到 state，
+  调用 `registry.settle_usage()` 会把 job 标记成「已结算」却不真正累加，用量永久丢失
+  （实现过程中确实踩到过，由测试抓出）。
 - `read_file` 在 offset 越过文件末尾时返回 `"(空文件)"`：它复用了 `read_and_register` 的返回值，
   而那个「文件只有 N 行，但 offset 是 M」的分支是给 @ 引用直接返回给模型用的，被绕过之后
   空切片走到了 `_with_line_numbers("")`。后果是模型会误判「这个文件是空的」——与事实相反，
