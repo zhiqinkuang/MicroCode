@@ -16,6 +16,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+import images
 from agent.file_state import ReadFileState
 from agent.tools import read_and_register
 
@@ -37,16 +38,27 @@ def extract_at_mentions(text: str) -> list[str]:
     return seen
 
 
-def build_mention_messages(paths: list[str], state: ReadFileState) -> list:
+def build_mention_messages(paths: list[str], state: ReadFileState, attachments: list) -> tuple:
     """
-    把每个被 @ 的文件读出来，为它伪造一对 read_file 的 tool_call + tool_return，返回要塞进历史的消息列表。
+    把每个被 @ 的文件读出来：文本文件为它伪造一对 read_file 的 tool_call + tool_return（塞进历史的消息），
     read_and_register 顺手把文件登记进 readFileState，和真正的 read_file 调用一模一样，之后 edit_file 就不会被拦。
+    图片不走工具调用，直接读成附件 append 进 attachments（编号 = 追加后的列表长度，排在剪贴板粘贴的图后面）。
+
+    返回 (messages, image_numbers)：image_numbers 是 [(用户输入里的路径, 附件编号), ...]，
+    调用方据此把文本里的 @path 原地换成 [Image #N] 占位符。
     """
     messages = []
+    image_numbers = []
     for path in paths:
         abs_path = os.path.abspath(os.path.expanduser(path))
         # 不存在的路径、目录都跳过，简化处理
         if not os.path.isfile(abs_path):
+            continue
+        # 图片不伪造 read_file 记录（工具返回也没法以文本形式塞历史），直接读成附件
+        if images.is_image(abs_path):
+            content = images.load_image(abs_path)
+            number = images.append_attachment(attachments, content)
+            image_numbers.append((path, number))
             continue
         try:
             numbered = read_and_register(state, abs_path)
@@ -67,7 +79,7 @@ def build_mention_messages(paths: list[str], state: ReadFileState) -> list:
                 parts=[ToolReturnPart(tool_name="read_file", content=numbered, tool_call_id=call_id)]
             )
         )
-    return messages
+    return messages, image_numbers
 
 
 # 遍历目录时跳过的常见噪音目录：依赖、缓存、构建产物，列出来当文件候选没意义

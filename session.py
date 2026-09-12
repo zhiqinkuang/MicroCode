@@ -60,7 +60,15 @@ def first_prompt(path: Path) -> str:
             for part in msg.get("parts", []):
                 if part.get("part_kind") != "user-prompt":
                     continue
-                content = str(part.get("content", ""))
+                raw = part.get("content", "")
+                # 多模态内容是图文块列表：图片块换成占位摘要再拼接，别把 base64 塞进摘要
+                if isinstance(raw, list):
+                    content = " ".join(
+                        f"[图片 {item.get('media_type', '')}]" if isinstance(item, dict) else str(item)
+                        for item in raw
+                    )
+                else:
+                    content = str(raw)
                 # 通知文本跳过，继续找首条真实用户输入
                 if content.startswith("<task-notification>"):
                     break

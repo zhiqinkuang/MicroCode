@@ -12,7 +12,7 @@ from .tools import TOOLS
 # subagents 模块级 import：core 只在 project_context（每次请求时）取类型清单，
 # import 顺序上它不反向依赖 core，不会循环
 import subagents
-# model 实例化拆去了 .model（subagent 也要用同一个 model，从 core 反向 import 会循环）
+# Agent 可能在工具阶段才读到图片，因此配置模型必须支持视觉输入。
 from .model import model
 # 长期记忆：instructions 是静态约定（拼在主指令末尾），store 在 project_context 里每轮注入 MEMORY.md 索引
 from memory.instructions import MEMORY_INSTRUCTIONS

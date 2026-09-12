@@ -9,7 +9,7 @@ import session
 import mcp_servers
 # 长期记忆三件套：store 建目录、recall 每轮前召回、background 每轮后提炼 + 退出收尾
 from memory import store as memory_store, recall as memory_recall, background as memory_background
-from agent import agent, MODEL_NAME, api_call_log
+from agent import agent, MODEL_NAME, VISION_MODEL_NAME, select_turn_model, api_call_log
 from agent.deps import AgentDeps
 from UI.input_ui import Repl
 from UI.render import print_welcome_banner
@@ -21,6 +21,7 @@ from UI.commands import (
 )
 from mentions import build_mention_messages, extract_at_mentions
 from agent.reminders import build_job_reminder_text
+import images
 import subagents
 
 logger = logging.getLogger(__name__)
@@ -52,12 +53,16 @@ async def handle_command(user_input, state):
     return "continue" if result else "break"
 
 #异步启动agent loop
-async def run_agent_loop(user_input, state):
+async def run_agent_loop(user_input, state, model=None):
     """
     用 agent.iter() 自己驱动 Agent 图，每跑完一个节点就把新增的 part 实时打出来，
     跑完后再把结果（history、token、API 调用元数据）同步到 state。
     """
     api_call_log.clear()
+
+    # 模型选择：显式传入（测试、子代理）优先；否则按本轮内容路由，含图片块切视觉模型。
+    # read_file 可能把图片带进本轮工具调用，所以整轮必须用支持视觉输入的模型。
+    selected_model = model if model is not None else select_turn_model(user_input)
 
     # deps 把 read_file_state / tasks_store / file_history / job_registry 打包成 AgentDeps 注入：file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点），task 工具取 .tasks_store，shell 工具取 .job_registry，hooks 也从同一个 deps 读状态
     deps = AgentDeps(
@@ -66,7 +71,13 @@ async def run_agent_loop(user_input, state):
         file_history=state.file_history,
         job_registry=state.job_registry,
     )
-    async with agent.iter(user_input, message_history=state.history, deps=deps,toolsets=mcp_servers.active_toolsets(),) as run:
+    async with agent.iter(
+        user_input,
+        message_history=state.history,
+        deps=deps,
+        toolsets=mcp_servers.active_toolsets(),
+        model=selected_model,
+    ) as run:
         node = run.next_node
 
         while not isinstance(node, End):
@@ -98,21 +109,38 @@ async def run_agent_loop(user_input, state):
     # 每轮结束后后台提炼记忆：主对话这轮已自己写过记忆就跳过，否则 fork 对话提炼值得保存的
     memory_background.schedule(state, new_messages)
 
-def inject_at_mentions(user_input, state):
+def inject_at_mentions(user_input, state, attachments: list) -> str:
+    """
+    @ 引用处理：文本文件伪造 read_file 记录塞进历史（原逻辑不变）；
+    图片读成附件追加进 attachments，并把文本里的 @path 原地换成 [Image #N] 占位符。
+    返回处理后的输入文本，供后续拼装多模态 prompt。
+    """
     paths = extract_at_mentions(user_input)
     if not paths:
-        return
-    mention_messages = build_mention_messages(paths, state.read_file_state)
-    if not mention_messages:
-        return
-    # 塞进历史：模型下一轮就能看到这些「读文件」记录
-    state.history += mention_messages
-    # 持久化，/resume 恢复会话时能连同引用的文件一起还原
-    session.append_messages(state.session_id, mention_messages)
-    # 终端回显注入了哪些文件，让你看到 @ 确实生效
-    for msg in mention_messages:
-        for part in msg.parts:
-            print_part(part)
+        return user_input
+    mention_messages, image_numbers = build_mention_messages(paths, state.read_file_state, attachments)
+    if mention_messages:
+        # 塞进历史：模型下一轮就能看到这些「读文件」记录
+        state.history += mention_messages
+        # 持久化，/resume 恢复会话时能连同引用的文件一起还原
+        session.append_messages(state.session_id, mention_messages)
+        # 终端回显注入了哪些文件，让你看到 @ 确实生效
+        for msg in mention_messages:
+            for part in msg.parts:
+                print_part(part)
+    # @ 引用的图片原地换成占位符：图片停在它出现的句中位置，不统一追加到末尾
+    for path, number in image_numbers:
+        user_input = user_input.replace(f"@{path}", f"[Image #{number}]")
+    return user_input
+
+
+def prepare_user_input(text: str, state):
+    """完成本地图片组装，成功后一次性消费待发送附件。"""
+    attachments = list(state.attachments)
+    prepared_text = inject_at_mentions(text, state, attachments)
+    user_input = images.build_user_content(prepared_text, attachments) if attachments else prepared_text
+    state.attachments.clear()
+    return user_input
 
 async def watch_jobs(repl, state):
     """
@@ -166,6 +194,7 @@ async def main():
     # file_history 在 SessionState.__post_init__ 里按 session_id 建好，第一轮用户输入就会 make_checkpoint，/rewind 一开始就有得回退
     state = SessionState(
         model_name=MODEL_NAME,
+        vision_model_name=VISION_MODEL_NAME,
         session_id=sid,
     )
     print_welcome_banner("Coding Agent")
@@ -209,10 +238,11 @@ async def main():
         # 先把 @ 引用解析进历史，再交给 Agent，开启 working 指示器
         repl.start_working()
         try:
-            inject_at_mentions(text, state)
+            # 本地图片校验和 @ 引用解析完成后才消费待发送附件；校验失败时用户仍可修改后重试
+            user_input = prepare_user_input(text, state)
             # 召回相关长期记忆塞进历史后再交给 Agent（和 @ 引用一样持久化，/resume 可还原）
             await memory_recall.inject_memories(text, state)
-            await run_agent_loop(text, state)
+            await run_agent_loop(user_input, state)
         except asyncio.CancelledError:
             # 用户按 ESC / Ctrl+C 打断：交给 _process 的 except 统一打印中断信息
             raise

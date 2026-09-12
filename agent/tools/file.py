@@ -4,6 +4,8 @@
 import os
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.messages import BinaryContent
+import images
 from ..deps import AgentDeps
 from ..file_state import ReadFileState
 DEFAULT_MAX_LINES = 2000
@@ -51,8 +53,19 @@ def read_and_register(state: ReadFileState, path: str, offset: int = 1, limit: i
         result += f"\n\n（文件共 {total} 行，还有 {total - end} 行未显示。用 offset={end + 1} 继续读取）"
     return result
 
-def read_file(ctx: RunContext[AgentDeps], path: str, offset: int = 1, limit: int | None = None) -> str:
-    """读取文件内容，输出带行号。大文件请用 offset/limit 分段读取。"""
+def read_file(ctx: RunContext[AgentDeps], path: str, offset: int = 1, limit: int | None = None) -> str | BinaryContent:
+    """
+    读取文件内容，输出带行号。大文件请用 offset/limit 分段读取。
+    也可以读取图片（png/jpg/jpeg/gif/webp）：图片会以图像形式呈现给你（你是多模态模型）。
+    用户给出截图路径时，一律用这个工具查看。
+    """
+    # 图片走多模态分支：读成 BinaryContent 直接返回，SDK 会转成图片输入交回模型
+    if images.is_image(path):
+        try:
+            return images.load_image(path)
+        except images.ImageInputError as exc:
+            raise ModelRetry(str(exc)) from exc
+
     # 去重：上次 read_file 读过同一段、文件也没变过，不重复往上下文里塞内容
     record = ctx.deps.read_file_state.get(path)
     if record is not None and record.get("offset") is not None:
