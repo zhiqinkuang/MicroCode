@@ -19,6 +19,8 @@ class AgentDeps:
     job_registry: JobRegistry | None = None
     # sub agent 运行时指向它自己对应的 job：审批冒泡时要告诉用户是哪个 sub agent 在请求
     subagent_job: Job | None = None
-    # 编辑—验证—纠错闭环状态：file 工具标记改动、shell 工具记录验证结果、hooks 判定是否强制介入。
-    # 刻意放在字段表最后：新字段不插队，既有的位置参数构造方（如子代理测试）不受影响
+    # 编辑—验证—纠错闭环状态：file 工具标记改动、shell 工具记录验证结果、hooks 判定是否强制介入
     iteration: IterationState | None = None
+    # 只读子代理（explore 及推导为只读的自定义类型）为 True：写文件工具据此硬拒。
+    # 新字段一律追加在字段表末尾——中间插队会让用位置参数构造 deps 的调用方整体错位
+    readonly: bool = False

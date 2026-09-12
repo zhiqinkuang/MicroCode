@@ -13,6 +13,22 @@ from ..iteration import IterationState
 DEFAULT_MAX_LINES = 2000
 
 
+def _refuse_if_readonly(ctx: RunContext[AgentDeps], path: str) -> None:
+    """
+    只读子代理的权威强制点。刻意放在 file 工具里而不是权限 hook 里：
+    即便 hook 被拆掉、被替换，或将来又新增一个写文件工具，这条约束依然成立。
+
+    用 ModelRetry 而不是抛异常：与工具里既有的先读后写、mtime 冲突等约束形态一致，
+    拒绝会作为 retry-prompt 回填给子代理，它可以自己改走只读做法，整个 job 不会崩。
+    """
+    if ctx.deps.readonly:
+        raise ModelRetry(
+            f"当前是只读子代理，禁止修改文件（{path}）。"
+            "请改用只读方式完成任务（read_file / 只读的 run_command），"
+            "或在最终报告里说明这一步没有做。"
+        )
+
+
 def _mark_edit(ctx: RunContext[AgentDeps], path: str) -> None:
     """
     把「这个文件被改过」记进闭环状态。只有真的写盘成功才调用它——
@@ -124,6 +140,10 @@ def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string
         new_string: 替换后的新内容
         replace_all: 是否替换所有匹配项，默认只替换唯一的一处
     """
+    # 0. 只读类型直接拒：必须排在「先读后写」之前，否则只读的调用会先被
+    #    「还没读过这个文件」打回，把真正的原因带偏，模型会去反复 read_file 而不是停手
+    _refuse_if_readonly(ctx, path)
+
     # 1. 空操作：换了个寂寞，直接打回
     if old_string == new_string:
         raise ModelRetry("old_string 和 new_string 完全相同，这次编辑没有任何改动")
@@ -181,6 +201,9 @@ def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
     覆盖已有文件前必须先用 read_file 读取过，否则会报错。
     修改已有文件优先用 edit_file（只传改动片段，省 token），write_file 只用于新建文件或整体重写。
     """
+    # 0. 只读类型直接拒，且必须在任何写盘动作与校验之前
+    _refuse_if_readonly(ctx, path)
+
     # 覆盖已有文件：沿用 edit_file 那套先读后写约束，防止整体覆盖掉没读过的内容
     state = ctx.deps.read_file_state
     if os.path.exists(path):
