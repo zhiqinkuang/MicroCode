@@ -30,7 +30,10 @@ MODES = [DEFAULT, ACCEPT_EDITS, AUTO, BYPASS]
 # 只读工具，任何模式都自动放行（读取不会改动系统，放行没风险）
 # job_kill 只能终止 Agent 自己起的 job（起进程那一步已经审批过），终止是把影响收回来，不必再问
 # run_agent 权限下沉：派 agent 本身不改动任何东西，真正动系统的是 sub agent 的工具调用，那一层把关
-READONLY_TOOLS = {"read_file", "ask_user_question", "task_create", "task_list", "task_get", "task_update", "job_kill", "run_agent"}
+READONLY_TOOLS = {
+    "read_file", "load_skill", "ask_user_question", "task_create", "task_list",
+    "task_get", "task_update", "job_kill", "run_agent",
+}
 # 编辑文件类工具，acceptEdits 模式下自动放行
 EDIT_TOOLS = {"write_file", "edit_file"}
 # 工具自检注册表：通用权限规则只认工具名，但危不危险往往取决于参数，只有工具自己最懂参数的语义
@@ -209,4 +212,3 @@ async def prompt_approval(tool_name: str, args: dict, requester: str = "") -> st
         question = f"{requester}是否允许执行 {_format_call(tool_name, args)}？"
         choice = await _ApprovalPicker(question, options).run()
     return choice
-

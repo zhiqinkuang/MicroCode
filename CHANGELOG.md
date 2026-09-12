@@ -6,6 +6,8 @@
 
 ### Added
 
+- 渐进式 Skill 系统：发现个人级和项目级 `SKILL.md`，每轮仅注入名称与描述，使用 `load_skill` 按需加载正文。
+- 项目级 `reviewing-code` 示例 Skill，以及可选真实模型链路的完整 `test/test_skills.py` 测试脚本。
 - 后台 `run_agent`：内置 explore / general、自定义项目级 agent、独立上下文与最终报告通知。
 - `/agents` 类型清单、分类后台任务计数、子代理审批冒泡和离线回归测试。
 - `auto` 权限模式：`ask` 的工具调用先交给旁路 LLM classifier 判定能否自动放行，classifier 拦截或出错时回退人工审批（fail-closed）。
