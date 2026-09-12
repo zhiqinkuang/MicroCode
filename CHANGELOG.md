@@ -6,6 +6,12 @@
 
 ### Added
 
+- `tests/test_hardening_e2e.py`：加固相关的完整离线测试（45 项）。含三条真实端到端链路——
+  ① 主 agent 经真实 `run_agent → JobRegistry.spawn_agent → run_subagent` 派发 explore，
+  断言只读子代理没写出任何文件、报告回流进 `job.result`；② 同链路的 general 反向对照（必须写出）；
+  ③ 把 `DEEPSEEK_API_BASE` 指向本地假服务，断言 `classifier.classify` / `recall._select`
+  真的打到该端点（不是自证 `base_url` 相等）。另有权限决策矩阵、mode 循环、
+  classifier 的 fail-closed 与防注入转写、file 工具的全部约束分支、iteration / reminders / job 注册表。
 - 编辑—验证—纠错闭环：`edit_file` / `write_file` 写盘后记账，`run_command(verify=True)` 声明验证；
   模型想收尾但没拿到通过的验证时，`after_model_request` 闸门抛 `ModelRetry` 拒收该回合，
   把改动清单、退出码与输出尾部灌回去，驱动它继续修。最多拦停 3 次后有界放行，并要求如实交代。
@@ -27,6 +33,12 @@
 
 ### Fixed
 
+- `read_file` 在 offset 越过文件末尾时返回 `"(空文件)"`：它复用了 `read_and_register` 的返回值，
+  而那个「文件只有 N 行，但 offset 是 M」的分支是给 @ 引用直接返回给模型用的，被绕过之后
+  空切片走到了 `_with_line_numbers("")`。后果是模型会误判「这个文件是空的」——与事实相反，
+  且导向的下一步完全错误（放弃文件 vs 改 offset）。现在该分支在 `read_file` 里也生效，
+  并且这条路径不再登记 offset（不会被去重逻辑认成「读过这一段」）。
+  由新增的端到端测试抓出。
 - 闭环闸门消耗的是**文本输出**重试预算而不是工具预算：`Agent` 默认 `output` 预算只有 1，
   第二次拦停会以 `UnexpectedModelBehavior: Exceeded maximum output retries` 把整个 run 打挂。
   已在 `agent/core.py` 设 `retries={"output": MAX_INTERVENTIONS + 1}`。

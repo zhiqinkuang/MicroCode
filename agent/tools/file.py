@@ -111,6 +111,18 @@ def read_file(ctx: RunContext[AgentDeps], path: str, offset: int = 1, limit: int
     all_lines = content.splitlines()
     total = len(all_lines)
     start = offset - 1
+
+    # offset 越过文件末尾：必须在这里回一句「越界」，不能掉进下面的空切片。
+    # 掉进去会走到 _with_line_numbers("") 并返回 "(空文件)"，模型会误判成
+    # 「这个文件是空的」，而不是「我给的 offset 太靠后了」——两种结论导向的下一步完全不同。
+    # read_and_register 里有一模一样的判断，但那条路径是给 @ 引用用的、直接把警告串返回给模型；
+    # read_file 复用的是它的返回值，等于绕过了那个分支（本用例就是这么抓出来的）。
+    if start >= total and total > 0:
+        # 仍然登记全量快照（edit_file 的唯一性检查依赖它），但 offset 传 None：
+        # 这条路径没读到任何一段，不该被去重逻辑认成「读过这一段了」
+        ctx.deps.read_file_state.record(path, content)
+        return f"警告：文件只有 {total} 行，但 offset 是 {offset}，没有内容可读"
+
     end = start + limit if limit is not None else start + DEFAULT_MAX_LINES
     selected = all_lines[start:end]
     selected_content = "\n".join(selected)
