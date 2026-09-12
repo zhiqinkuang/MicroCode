@@ -6,6 +6,8 @@
 
 ### Added
 
+- `tests/test_token_usage.py`：子代理 token 计量的 7 项离线回归（记在 job 上、并入累计、
+  重复结算不重复计入、注册表结算契约、晚跑完的子代理由下一轮兜住、收尾结算兜底）。
 - `tests/test_hardening_e2e.py`：加固相关的完整离线测试（45 项）。含三条真实端到端链路——
   ① 主 agent 经真实 `run_agent → JobRegistry.spawn_agent → run_subagent` 派发 explore，
   断言只读子代理没写出任何文件、报告回流进 `job.result`；② 同链路的 general 反向对照（必须写出）；
@@ -33,6 +35,16 @@
 
 ### Fixed
 
+- **子代理的 token 用量完全没被计入**：`main.py` 只把主 agent 的 `result.usage` 累加进
+  `SessionState`，而子代理在 `run_subagent` 里独立跑，它的用量既不入 job 也不入会话累计，
+  `/status` 看到的一直是偏低的数字。子代理恰是 token 大户（全新上下文要完整交代背景 +
+  最多 40 轮 + 最终报告），所以任何用过 `run_agent` 的一轮，token 统计都系统性偏低。
+  现在 `run_subagent` 把用量记进 `job.usage`，`SessionState.settle_job_usage()` 幂等地
+  并入累计（`job.usage_settled` 保证只并一次）。
+  **结算只发生在能改到 `state` 的地方**：`run_agent_loop` 的首尾与 `watch_jobs` 的空闲轮询。
+  刻意不在 `build_job_reminder_text` 里结算——那个函数只有 registry、拿不到 state，
+  调用 `registry.settle_usage()` 会把 job 标记成「已结算」却不真正累加，用量永久丢失
+  （实现过程中确实踩到过，由测试抓出）。
 - `read_file` 在 offset 越过文件末尾时返回 `"(空文件)"`：它复用了 `read_and_register` 的返回值，
   而那个「文件只有 N 行，但 offset 是 M」的分支是给 @ 引用直接返回给模型用的，被绕过之后
   空切片走到了 `_with_line_numbers("")`。后果是模型会误判「这个文件是空的」——与事实相反，
