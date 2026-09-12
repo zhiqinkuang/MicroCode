@@ -1,4 +1,5 @@
 import asyncio
+import platform
 import re
 import time
 from html import escape as html_escape
@@ -19,6 +20,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from rich.markup import escape
 
 import permissions
+import images
 from mentions import list_candidate_files
 from .render import console
 
@@ -104,6 +106,10 @@ class Repl:
         if counts:
             summary = " · ".join(f"{count} {html_escape(kind)}" for kind, count in sorted(counts.items()))
             line += f"  <ansicyan>⚙ {summary}</ansicyan><ansibrightblack>（/jobs 查看）</ansibrightblack>"
+        # 攒着未发送的图片附件（剪贴板粘贴）：提交前一直在，提示用户图会随本轮一起发出
+        attachments = getattr(self.state, "attachments", [])
+        if attachments:
+            line += f"  <ansicyan>📷 {len(attachments)} 张图片待发送</ansicyan>"
         return HTML(line)
 
     def _divider(self):
@@ -173,11 +179,12 @@ class Repl:
 
         @kb.add("escape")
         def _(event):
-            # 请求中打断；空闲时清空输入行
+            # 请求中打断；空闲时清空输入行，攒着的剪贴板图片附件一并丢弃
             if self._task is not None:
                 self._task.cancel()
             else:
                 self._buffer.reset()
+                self.state.attachments.clear()
 
         @kb.add("c-d")
         def _(event):
@@ -200,7 +207,32 @@ class Repl:
                 console.print(f"[cyan]⇄ 已把前台 job {ids} 转入后台，继续运行中（/jobs 查看）[/]")
                 self.app.invalidate()
 
+        # 图片粘贴：终端的普通粘贴只进文本，图片要调系统剪贴板工具取；
+        # Windows 的 Ctrl+V 被终端自己占用，换 Alt+V
+        @kb.add("escape", "v") if platform.system() == "Windows" else kb.add("c-v")
+        def _(event):
+            self._paste_image()
+
         return kb
+
+    def _paste_image(self):
+        # 从剪贴板取图：取到就把附件攒进 state.attachments，输入行插入 [Image #N] 占位符
+        # 占位符只是终端里的显示，发请求前 build_user_content 会把它替换成真实图片
+        try:
+            content = images.read_clipboard_image()
+        except images.ImageInputError as exc:
+            console.print(f"[yellow]{exc}[/]")
+            return
+        if content is None:
+            console.print("[yellow]剪贴板里没有图片[/]")
+            return
+        try:
+            number = images.append_attachment(self.state.attachments, content)
+        except images.ImageInputError as exc:
+            console.print(f"[yellow]{exc}[/]")
+            return
+        self._buffer.insert_text(f"[Image #{number}]")
+        self.app.invalidate()
 
     @property
     def is_idle(self) -> bool:

@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 import shutil
+
+import images
 from pydantic_ai.messages import ModelMessagesTypeAdapter
 from pydantic_core import to_jsonable_python
 
@@ -60,7 +62,10 @@ def first_prompt(path: Path) -> str:
             for part in msg.get("parts", []):
                 if part.get("part_kind") != "user-prompt":
                     continue
-                content = str(part.get("content", ""))
+                raw = part.get("content", "")
+                # 多模态内容是图文块列表：摘要规则和终端回放共用 images.summarize_content，
+                # 图片只留类型和大小，别把 base64 塞进会话列表
+                content = images.summarize_content(raw) if isinstance(raw, list) else str(raw)
                 # 通知文本跳过，继续找首条真实用户输入
                 if content.startswith("<task-notification>"):
                     break

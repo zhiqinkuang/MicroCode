@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 import compact
+import images
 import os
 import logging
 import permissions
@@ -11,6 +12,7 @@ import subagents
 from memory import background as memory_background, store as memory_store
 from rich.markdown import Heading, Markdown
 from rich.markup import escape
+from pydantic_ai.messages import BinaryContent
 from rich.padding import Padding
 from rich.rule import Rule
 import questionary
@@ -45,6 +47,8 @@ class SessionState:
     input_tokens :int = 0
     output_tokens:int =0
     model_name:str = ""
+    # 视觉模型名：只在含图片的一轮生效，/status 展示出来便于确认路由
+    vision_model_name:str = ""
     # 当前会话 ID，用于把消息追加到对应的 jsonl 文件
     session_id: str = ""
     # 最近一轮 user input 触发的所有 model API 调用记录
@@ -63,6 +67,8 @@ class SessionState:
     surfaced_memories: set = field(default_factory=set)
     # 本会话的后台任务注册表：按 session_id 隔离日志目录，/new /resume 时换新实例
     job_registry: JobRegistry = field(default=None)
+    # 输入行攒着未发送的图片附件（Ctrl+V 粘贴）：提交时随本轮一起发给模型，ESC 清空
+    attachments: list = field(default_factory=list)
 
     def __post_init__(self):
         # tasks_store / file_history / job_registry 都依赖 session_id，没法用 default_factory（拿不到其他字段），在 __post_init__ 里按 session_id 建
@@ -107,6 +113,14 @@ def _full(text) -> str:
     return escape(str(text).strip())
 
 
+def _prompt_summary(content) -> str:
+    """
+    用户输入可能是多模态内容块列表（图文混排）：摘要规则由 images.summarize_content 统一持有，
+    这里只做终端层转发，避免回放时把 base64 打到终端上、也避免和会话列表的规则漂移。
+    """
+    return images.summarize_content(content)
+
+
 def _format_part_line(part) -> Optional[str]:
     """
     把一条消息里的单个 part 格式化为带 Rich markup 的字符串。
@@ -115,7 +129,7 @@ def _format_part_line(part) -> Optional[str]:
     # 内容行统一缩进 2 格，和图标（占 2 格：图标 + 空格）后的 role 名对齐
     kind = part.part_kind
     if kind == "user-prompt":
-        return f"[cyan]❯ user[/]\n  {_truncate(part.content)}"
+        return f"[cyan]❯ user[/]\n  {_truncate(_prompt_summary(part.content))}"
     if kind == "thinking":
         # thinking 整块 dim，弱化视觉权重；不截断，完整保留思考过程
         return f"[dim]✻ thinking[/]\n  [dim]{_full(part.content)}[/]"
@@ -148,6 +162,14 @@ def print_part(part) -> None:
     """
     渲染单个消息 part：assistant 文本走 Markdown 块渲染，其余 part 是单行文本。
     """
+    # 图片附件（read_file 返回的 BinaryContent 等）不打印字节，只显示媒体类型和大小；
+    # 这只是界面上的摘要，part.content 里依然是完整图片，照常传给模型。
+    # ToolCallPart 没有 content 属性，用 getattr 兜住
+    content = getattr(part, "content", None)
+    if isinstance(content, BinaryContent):
+        size = len(content.data) / 1024
+        console.print(f"  [magenta dim]图片 {content.media_type}，{size:.0f} KB[/]")
+        return
     if part.part_kind == "text":
         content = (part.content or "").strip()
         if content:
@@ -202,6 +224,8 @@ async def cmd_new(state: SessionState) -> bool:
     state.surfaced_memories.clear()
     # 换一个新的 ReadFileState：新会话没读过任何文件，旧会话的读取状态不该带过来
     state.read_file_state = ReadFileState()
+    # 输入行攒着的图片附件随旧会话一起丢弃
+    state.attachments.clear()
     # 换一个新的会话 ID，后续消息写进新文件
     state.session_id = session.new_session_id()
     # tasks_store / file_history / job_registry 按 session_id 隔离落盘，新会话用全新空 store
@@ -217,6 +241,8 @@ async def cmd_new(state: SessionState) -> bool:
 
 def cmd_status(state: SessionState) -> bool:
     console.print(f"模型：           {state.model_name}")
+    if state.vision_model_name:
+        console.print(f"视觉模型：       {state.vision_model_name}")
     console.print(f"历史消息条数：    {len(state.history)}")
     used = compact.context_tokens(state.history)
     threshold = compact.compact_threshold()
