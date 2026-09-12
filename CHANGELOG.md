@@ -6,6 +6,13 @@
 
 ### Added
 
+- 编辑—验证—纠错闭环：`edit_file` / `write_file` 写盘后记账，`run_command(verify=True)` 声明验证；
+  模型想收尾但没拿到通过的验证时，`after_model_request` 闸门抛 `ModelRetry` 拒收该回合，
+  把改动清单、退出码与输出尾部灌回去，驱动它继续修。最多拦停 3 次后有界放行，并要求如实交代。
+- `agent/iteration.py`：`IterationState` 会话级闭环状态（改动路径、验证记录、拦停计数），
+  按轮重置、不落盘；`agent/reminders.py` 的 `build_verify_reminder_text` 负责要求正文。
+- `tests/test_opt_loop.py`：8 项离线回归（零拦停、拦停封顶、干活时不打扰、失败回流、
+  验证通过不拦、每轮清账、builder 契约、verify 记账）。
 - 渐进式 Skill 系统：发现个人级和项目级 `SKILL.md`，每轮仅注入名称与描述，使用 `load_skill` 按需加载正文。
 - 项目级 `reviewing-code` 示例 Skill，以及可选真实模型链路的完整 `test/test_skills.py` 测试脚本。
 - 后台 `run_agent`：内置 explore / general、自定义项目级 agent、独立上下文与最终报告通知。
@@ -20,6 +27,11 @@
 
 ### Fixed
 
+- 闭环闸门消耗的是**文本输出**重试预算而不是工具预算：`Agent` 默认 `output` 预算只有 1，
+  第二次拦停会以 `UnexpectedModelBehavior: Exceeded maximum output retries` 把整个 run 打挂。
+  已在 `agent/core.py` 设 `retries={"output": MAX_INTERVENTIONS + 1}`。
+- 新增的 `AgentDeps.iteration` 字段原本插在字段表中间，会让使用位置参数构造 deps 的调用方错位
+  （子代理测试实测报 `'NoneType' object has no attribute 'spawn_agent'`）；已把它放到字段表最后。
 - 图片轮偶发「我没有收到图片」：根因是系统提示词与文件工具共同构成的上下文中，模型误判内联图片不存在
   （线载荷经本地假服务验证图片块始终正确发出）。指令里明确说明图片随消息直接到达后，实测产品路径
   拒答率从 5/40 降到 0/60。

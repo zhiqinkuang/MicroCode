@@ -8,7 +8,20 @@ from pydantic_ai.messages import BinaryContent
 import images
 from ..deps import AgentDeps
 from ..file_state import ReadFileState
+from ..iteration import IterationState
+
 DEFAULT_MAX_LINES = 2000
+
+
+def _mark_edit(ctx: RunContext[AgentDeps], path: str) -> None:
+    """
+    把「这个文件被改过」记进闭环状态。只有真的写盘成功才调用它——
+    写盘失败不该算改动，否则闭环会平白多催一轮验证。
+    deps.iteration 为 None（未注入闭环状态的调用方）时静默跳过，保持原有行为。
+    """
+    state: IterationState | None = ctx.deps.iteration
+    if state is not None:
+        state.mark_edit(path)
 
 def _with_line_numbers(content: str, start_line: int = 1) -> str:
     """
@@ -157,6 +170,8 @@ def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string
     with open(path, "w", encoding="utf-8") as f:
         f.write(updated)
     state.record(path, updated)
+    # 9. 写盘成功才算改过：闭环据此判断这一轮是否需要验证
+    _mark_edit(ctx, path)
     return f"已编辑 {path}（替换 {count if replace_all else 1} 处）"
 
 
@@ -188,4 +203,6 @@ def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
         return f"错误：写入 {path} 失败 ({e})"
     # 新写入的内容同样登记进 readFileState，后续要再改就不必重读
     state.record(path, content)
+    # 写盘成功才算改过：闭环据此判断这一轮是否需要验证
+    _mark_edit(ctx, path)
     return f"已写入 {path}"

@@ -9,11 +9,17 @@ from typing import Any
 from UI.render import console, print_step
 import asyncio
 from pydantic_ai.capabilities import Hooks
-from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError
+from pydantic_ai.exceptions import ModelHTTPError, ModelAPIError, ModelRetry
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, UserPromptPart
 import permissions
 import classifier
-from .reminders import build_reminder_text, build_task_reminder_text, build_job_reminder_text
+from .reminders import (
+    build_reminder_text,
+    build_task_reminder_text,
+    build_job_reminder_text,
+    build_verify_reminder_text,
+)
+from .iteration import MAX_INTERVENTIONS, IterationState
 import dataclasses
 @dataclass
 class ApiCall:
@@ -246,6 +252,50 @@ _REMINDER_SENTINELS = {
     "task": "task 工具最近没有被使用",
 }
 _REMINDER_BUILDERS = (_build_file_reminder, _build_task_reminder, _build_job_reminder)
+
+
+def _has_tool_call(response) -> bool:
+    # 「模型是不是准备收尾」的判据：回复里没有任何工具调用。
+    # pydantic-ai 的 CallToolsNode._handle_final_result 正是拿这个当 run 的终点，
+    # 所以这里拦住的时机与它结束的时机严格对齐——不会误伤正常的工具轮次。
+    return any(part.part_kind == "tool-call" for part in response.parts)
+
+
+@hooks.on.after_model_request
+async def _enforce_verification(ctx, *, request_context, response):
+    """
+    编辑—验证—纠错闭环的闸门：模型想收尾但本轮改过文件却没拿到通过的验证时，
+    拒收这次回复并抛出 ModelRetry，把验证要求作为重试提示灌回去。
+
+    为什么必须放在这一层：End 由模型单方面决定（_handle_final_result），
+    在「最后一次模型请求」之后就再没有下一次请求可供注入——before_model_request
+    那类注入在这种收尾回合里最多只能生效一次。after_model_request 是唯一能在
+    收尾动作发生前把它拦下来的位置（ModelRetry 会触发新一次模型请求）。
+
+    ModelRetry 的预算由 core.py 的 Agent(retries=...) 控制；本函数自己再设一道
+    MAX_INTERVENTIONS 上限，确保一定会先于预算耗尽而停手，不会把整个 run 打挂。
+    """
+    iteration: IterationState | None = getattr(ctx.deps, "iteration", None)
+    if iteration is None or not iteration.needs_verification() or iteration.budget_exhausted():
+        return response
+    if _has_tool_call(response):
+        # 还在干活，不必打扰；等它真的想结束时再拦
+        return response
+
+    # 先记账再拼正文：正文里的「已连续介入 N 次」要包含这一次，
+    # 而且最后一次拦停必须自己带上封顶口径——它之后模型就被放行、不再回话了
+    iteration.interventions += 1
+    capped = iteration.interventions >= MAX_INTERVENTIONS
+    text = build_verify_reminder_text(iteration, capped=capped)
+    if not text:
+        return response
+
+    lead = f"第 {iteration.interventions}/{MAX_INTERVENTIONS} 次"
+    print_step(
+        "[blue]◈ verify[/]",
+        f"[blue dim]本轮改过文件但未通过验证，拦停并要求{'交代' if capped else '补验证'}（{lead}）[/]",
+    )
+    raise ModelRetry(text)
 
 
 @hooks.on.before_model_request
