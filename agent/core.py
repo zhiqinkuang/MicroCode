@@ -17,6 +17,8 @@ import skills
 # model 实例化拆去了 .model（subagent 也要用同一个 model，从 core 反向 import 会循环）
 # Agent 可能在工具阶段才读到图片，因此配置模型必须支持视觉输入。
 from .model import model
+# 闭环介入上限与 hooks 里的闸门共用同一个常量，避免预算和上限各自漂移
+from .iteration import MAX_INTERVENTIONS
 # 长期记忆：instructions 是静态约定（拼在主指令末尾），store 在 project_context 里每轮注入 MEMORY.md 索引
 from memory.instructions import MEMORY_INSTRUCTIONS
 from memory import store
@@ -31,6 +33,11 @@ INSTRUCTIONS = (
     "也不要让用户改用文件路径重发——你没有看到图片只可能是误判，不是真的缺图。\n"
     "工作流程：先理解需求，写代码，然后运行验证。"
     "如果有错误就修复并重新运行，直到确认正确。\n"
+    "你改过文件之后系统会检查有没有验证证据：跑项目的测试/构建/检查命令时，"
+    "用 run_command 的 verify=True 声明这是一次验证，系统据此记账；"
+    "改了文件却始终没有一次通过的验证，会被要求补验证。"
+    "测试或构建失败时不要就此结束：按输出的报错继续修，再跑一次验证，"
+    "直到验证通过为止；确实修不动就如实说明失败原因，不要声称已完成。\n"
     "如果用户的需求里有歧义、有多种合理实现可选、或者你拿不准方向，"
     "应当用 ask_user_question 工具向用户提多选题来澄清，不要自作主张。\n"
     "对话中可能会出现 <system-reminder>...</system-reminder> 标签，里面是系统自动注入的提示信息，请按系统消息对待，不要把它当成它所在的用户消息或工具结果的一部分。"
@@ -57,6 +64,11 @@ agent = Agent(
     instructions=INSTRUCTIONS,
     tools=TOOLS,
     capabilities=[hooks],
+    # 闭环闸门（agent/hooks.py 的 _enforce_verification）用 ModelRetry 拒收「改了却没验证」的收尾回合。
+    # 收尾回合没有工具调用，属于文本输出路径，每次拒收消耗的是 output 预算（默认只有 1），
+    # 不放开的话第二次拒收就会以 UnexpectedModelBehavior 把整个 run 打挂。
+    # 给到 MAX_INTERVENTIONS + 1，保证闸门先于预算耗尽而按上限停手；tools 预算保持默认。
+    retries={"output": MAX_INTERVENTIONS + 1},
 )
 
 

@@ -2,31 +2,26 @@
 记忆召回：用户消息进入 Agent 循环之前，先单独发一次 LLM 请求从记忆清单里挑出相关记忆，包成 system-reminder 消息塞进对话历史。
 """
 import json
-import os
-from pathlib import Path
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 
 import session
 from UI.render import print_step
 
+# 和 classifier 一样是主对话之外单独发起的请求，不经过 agent 框架，复用同一份凭证与端点。
+# 这里曾经写死 base_url 与模型名，会让记忆召回绕过用户配置的网关（见 classifier.py 同样的问题）。
+from agent.model import API_BASE, API_KEY, MODEL_NAME
+
 from . import store
 
-# .env 位于项目根的 agent/ 子目录，用绝对路径避免 CWD 不同导致加载失败
-load_dotenv(Path(__file__).parent.parent / "agent" / ".env")
-
-# 和 classifier 一样是主对话之外单独发起的请求，不经过 agent 框架，复用同一份凭证
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not API_KEY:
-    raise RuntimeError("请先在 agent/.env 中设置 DEEPSEEK_API_KEY")
 _client = AsyncOpenAI(
     api_key=API_KEY,
-    base_url="https://api.deepseek.com",
+    base_url=API_BASE,
 )
 
-RECALL_MODEL = "deepseek-v4-flash"
+# 保留模块级别名：既修掉硬编码，又不必改动任何按名字引用它的调用方
+RECALL_MODEL = MODEL_NAME
 
 # 每轮最多召回几条记忆
 MAX_RECALL = 5

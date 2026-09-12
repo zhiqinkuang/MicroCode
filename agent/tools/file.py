@@ -8,7 +8,36 @@ from pydantic_ai.messages import BinaryContent
 import images
 from ..deps import AgentDeps
 from ..file_state import ReadFileState
+from ..iteration import IterationState
+
 DEFAULT_MAX_LINES = 2000
+
+
+def _refuse_if_readonly(ctx: RunContext[AgentDeps], path: str) -> None:
+    """
+    只读子代理的权威强制点。刻意放在 file 工具里而不是权限 hook 里：
+    即便 hook 被拆掉、被替换，或将来又新增一个写文件工具，这条约束依然成立。
+
+    用 ModelRetry 而不是抛异常：与工具里既有的先读后写、mtime 冲突等约束形态一致，
+    拒绝会作为 retry-prompt 回填给子代理，它可以自己改走只读做法，整个 job 不会崩。
+    """
+    if ctx.deps.readonly:
+        raise ModelRetry(
+            f"当前是只读子代理，禁止修改文件（{path}）。"
+            "请改用只读方式完成任务（read_file / 只读的 run_command），"
+            "或在最终报告里说明这一步没有做。"
+        )
+
+
+def _mark_edit(ctx: RunContext[AgentDeps], path: str) -> None:
+    """
+    把「这个文件被改过」记进闭环状态。只有真的写盘成功才调用它——
+    写盘失败不该算改动，否则闭环会平白多催一轮验证。
+    deps.iteration 为 None（未注入闭环状态的调用方）时静默跳过，保持原有行为。
+    """
+    state: IterationState | None = ctx.deps.iteration
+    if state is not None:
+        state.mark_edit(path)
 
 def _with_line_numbers(content: str, start_line: int = 1) -> str:
     """
@@ -82,6 +111,18 @@ def read_file(ctx: RunContext[AgentDeps], path: str, offset: int = 1, limit: int
     all_lines = content.splitlines()
     total = len(all_lines)
     start = offset - 1
+
+    # offset 越过文件末尾：必须在这里回一句「越界」，不能掉进下面的空切片。
+    # 掉进去会走到 _with_line_numbers("") 并返回 "(空文件)"，模型会误判成
+    # 「这个文件是空的」，而不是「我给的 offset 太靠后了」——两种结论导向的下一步完全不同。
+    # read_and_register 里有一模一样的判断，但那条路径是给 @ 引用用的、直接把警告串返回给模型；
+    # read_file 复用的是它的返回值，等于绕过了那个分支（本用例就是这么抓出来的）。
+    if start >= total and total > 0:
+        # 仍然登记全量快照（edit_file 的唯一性检查依赖它），但 offset 传 None：
+        # 这条路径没读到任何一段，不该被去重逻辑认成「读过这一段了」
+        ctx.deps.read_file_state.record(path, content)
+        return f"警告：文件只有 {total} 行，但 offset 是 {offset}，没有内容可读"
+
     end = start + limit if limit is not None else start + DEFAULT_MAX_LINES
     selected = all_lines[start:end]
     selected_content = "\n".join(selected)
@@ -111,6 +152,10 @@ def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string
         new_string: 替换后的新内容
         replace_all: 是否替换所有匹配项，默认只替换唯一的一处
     """
+    # 0. 只读类型直接拒：必须排在「先读后写」之前，否则只读的调用会先被
+    #    「还没读过这个文件」打回，把真正的原因带偏，模型会去反复 read_file 而不是停手
+    _refuse_if_readonly(ctx, path)
+
     # 1. 空操作：换了个寂寞，直接打回
     if old_string == new_string:
         raise ModelRetry("old_string 和 new_string 完全相同，这次编辑没有任何改动")
@@ -157,6 +202,8 @@ def edit_file(ctx: RunContext[AgentDeps], path: str, old_string: str, new_string
     with open(path, "w", encoding="utf-8") as f:
         f.write(updated)
     state.record(path, updated)
+    # 9. 写盘成功才算改过：闭环据此判断这一轮是否需要验证
+    _mark_edit(ctx, path)
     return f"已编辑 {path}（替换 {count if replace_all else 1} 处）"
 
 
@@ -166,6 +213,9 @@ def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
     覆盖已有文件前必须先用 read_file 读取过，否则会报错。
     修改已有文件优先用 edit_file（只传改动片段，省 token），write_file 只用于新建文件或整体重写。
     """
+    # 0. 只读类型直接拒，且必须在任何写盘动作与校验之前
+    _refuse_if_readonly(ctx, path)
+
     # 覆盖已有文件：沿用 edit_file 那套先读后写约束，防止整体覆盖掉没读过的内容
     state = ctx.deps.read_file_state
     if os.path.exists(path):
@@ -188,4 +238,6 @@ def write_file(ctx: RunContext[AgentDeps], path: str, content: str) -> str:
         return f"错误：写入 {path} 失败 ({e})"
     # 新写入的内容同样登记进 readFileState，后续要再改就不必重读
     state.record(path, content)
+    # 写盘成功才算改过：闭环据此判断这一轮是否需要验证
+    _mark_edit(ctx, path)
     return f"已写入 {path}"

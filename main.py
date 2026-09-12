@@ -60,17 +60,23 @@ async def run_agent_loop(user_input, state, model=None):
     跑完后再把结果（history、token、API 调用元数据）同步到 state。
     """
     api_call_log.clear()
+    # 闭环记账按「本轮用户输入」为界：清掉上一轮的编辑与验证记录，
+    # 否则上一轮的欠账会压到这一轮头上。纯问答/纯查询不产生改动，闭环全程不介入
+    state.iteration.clear()
 
     # 模型选择：显式传入（测试、子代理）优先；否则按本轮内容路由，含图片块切视觉模型。
     # read_file 可能把图片带进本轮工具调用，所以整轮必须用支持视觉输入的模型。
     selected_model = model if model is not None else select_turn_model(user_input)
 
-    # deps 把 read_file_state / tasks_store / file_history / job_registry 打包成 AgentDeps 注入：file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点），task 工具取 .tasks_store，shell 工具取 .job_registry，hooks 也从同一个 deps 读状态
+    # deps 把 read_file_state / tasks_store / file_history / job_registry / iteration 打包成 AgentDeps 注入：
+    # file 工具取 .read_file_state 和 .file_history（写盘前 track_edit 留检查点）并登记改动，
+    # task 工具取 .tasks_store，shell 工具取 .job_registry 并登记验证结果，hooks 也从同一个 deps 读状态
     deps = AgentDeps(
         read_file_state=state.read_file_state,
         tasks_store=state.tasks_store,
         file_history=state.file_history,
         job_registry=state.job_registry,
+        iteration=state.iteration,
     )
     async with agent.iter(
         user_input,

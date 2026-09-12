@@ -5,6 +5,7 @@ from background_jobs import JobRegistry
 from tasks_store import TasksStore
 
 from .file_state import ReadFileState
+from .iteration import MAX_EDIT_PATHS_SHOWN, IterationState
 
 
 def _wrap(lines: list[str]) -> str:
@@ -42,6 +43,54 @@ def build_task_reminder_text(store: TasksStore) -> str:
         lines.append("")
         for t in tasks:
             lines.append(f"#{t.id}. [{t.status}] {t.subject}")
+    return _wrap(lines)
+
+
+def build_verify_reminder_text(state: IterationState, capped: bool = False) -> str | None:
+    """
+    拼出「改了文件但没验证」的强制要求正文，没有欠账就返回 None。
+    它只负责拼字，不记账：介入次数由真正的拦停点 agent/hooks.py 的
+    _enforce_verification 在拒收回合时累加，口径只有一处。
+    """
+    if not state.needs_verification():
+        return None
+
+    shown = state.edited_paths[:MAX_EDIT_PATHS_SHOWN]
+    lines = [
+        "系统检查：本轮你改动过文件，但没有取得一次通过的验证。",
+        "",
+        "已改动的文件：",
+        *[f"- {path}" for path in shown],
+    ]
+    if len(state.edited_paths) > len(shown):
+        lines.append(f"- 另有 {len(state.edited_paths) - len(shown)} 个文件未列出")
+    lines.append("")
+
+    last = state.last_verification()
+    if last is None:
+        lines.append("上一次验证：还没有跑过验证命令。")
+    else:
+        lines.append(f"上一次验证：{last.command}")
+        lines.append(f"退出码：{last.exit_code}（未通过）")
+        if last.output_tail:
+            lines.append("输出尾部：")
+            lines.append("```")
+            lines.append(last.output_tail)
+            lines.append("```")
+    lines.append("")
+
+    if capped:
+        lines.append(
+            f"系统已连续介入 {state.interventions} 次仍没拿到通过的验证，不再继续拦停。"
+            "现在不要再说「已完成」：请直接向用户说明——改了哪些文件、验证命令是什么、"
+            "失败输出的关键报错是什么、以及你判断修不动的原因；由用户决定下一步。"
+        )
+    else:
+        lines.append(
+            "请继续这一轮：先按上面的报错修改代码，然后用 run_command(verify=True) "
+            "重新跑一次验证，直到它通过为止。如果这个项目确实没有可跑的验证命令，"
+            "就如实说明你用了什么方式确认改动没问题。"
+        )
     return _wrap(lines)
 
 

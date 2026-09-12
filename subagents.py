@@ -48,10 +48,21 @@ sub_hooks = Hooks()
 async def _check_sub_permission(ctx, *, call, tool_def, args, handler):
     """
     sub agent 的权限关卡：权限下沉——审批不看「谁派的活」，只看「实际要干什么」。
-    第一层规则放行的照常放行；auto 模式交给 classifier 自动审批；
+    第 0 层只读强制；第一层规则放行的照常放行；auto 模式交给 classifier 自动审批；
     需要人工审批的调用不直接弹窗（sub agent 在后台运行，弹窗时机随机会打断用户），
     而是冒泡进队列，等主界面空闲时再由 watch_approvals 弹给用户，sub agent 挂起等待答复。
     """
+    # 第 0 层：只读子代理的写调用直接回填可操作说明。
+    # 权威强制在 file 工具里（hook 被拆掉也依然生效）；这里再拦一次是因为工具抛的
+    # ModelRetry 会被通用错误处理器转成「工具执行出错」，子代理拿不到那句「请改用只读方式」，
+    # 容易反复重试同一个写操作。
+    # getattr 兜底：与 agent/hooks.py 里取 iteration 的写法一致，deps 没这个字段时按可写处理
+    # （权威强制在 file 工具里，那里 deps 一定是真 AgentDeps，不依赖这次兜底）
+    if getattr(ctx.deps, "readonly", False) and call.tool_name in WRITE_TOOL_NAMES:
+        return (
+            f"当前是只读子代理，禁止调用 {call.tool_name}。"
+            "请改用只读方式完成任务，或在最终报告里说明这一步没有做。"
+        )
     # 第一层：规则能直接放行的（只读工具、bypass 模式等）照常放行
     if permissions.compute_decision(call.tool_name, args) == "allow":
         return await handler(args)
@@ -151,6 +162,9 @@ class AgentType:
     instructions: str
     # "built-in" 或自定义 agent 的定义文件路径
     source: str
+    # 只读类型：工具表里不挂写文件工具，且运行时由 file 工具硬拒（deps.readonly）。
+    # 内置 explore 显式声明；自定义类型按工具表推导，见 load_custom_agents
+    readonly: bool = False
     # 对应的 Agent 实例
     agent: Agent = field(init=False, repr=False)
 
@@ -167,6 +181,15 @@ _TOOL_FUNCS = {
     "write_file": write_file,
     "run_command": run_command,
 }
+
+# 哪些工具属于「写」：派发自检、只读推导、只读类型的运行时强制都以它为准，口径只留这一处。
+# run_command 刻意不算——它可能只是 cat/grep，算成「写能力」会把 explore 的常规派发也变成要审批
+WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file"})
+
+
+def has_write_tools(tool_names) -> bool:
+    """这组工具里是否包含写文件能力。派发自检与只读推导共用它，避免两处各写一遍判定。"""
+    return bool(set(tool_names) & WRITE_TOOL_NAMES)
 
 
 def _build_tools(tool_names: list[str]) -> list:
@@ -251,6 +274,8 @@ _register(AgentType(
     tool_names=["read_file", "run_command"],
     instructions=EXPLORE_INSTRUCTIONS,
     source="built-in",
+    # 只读是代码事实，不再只靠 EXPLORE_INSTRUCTIONS 那句「严禁做任何修改」
+    readonly=True,
 ))
 _register(AgentType(
     name="general",
@@ -258,6 +283,7 @@ _register(AgentType(
     tool_names=["read_file", "edit_file", "write_file", "run_command"],
     instructions=GENERAL_INSTRUCTIONS,
     source="built-in",
+    readonly=False,
 ))
 
 
@@ -314,12 +340,19 @@ def load_custom_agents() -> int:
         if unknown_tools:
             logger.warning("跳过自定义 agent %s：未知工具 %s", path, ", ".join(sorted(unknown_tools)))
             continue
+        # readonly 的来源：frontmatter 里显式写了就以它为准（readonly: true 能在配了
+        # 写工具的情况下把类型强制成只读）；没写就按工具表推导——配了写工具=可写、
+        # 只配只读工具=只读。推导而不是「一律默认可写」，是为了让既有自定义 agent
+        # 的行为逐字节不变，同时拿到「只读类型真的只读」这个属性。
+        declared = str(meta.get("readonly", "")).strip().lower()
+        readonly = declared == "true" if declared else not has_write_tools(tool_names)
         _register(AgentType(
             name=name,
             description=description,
             tool_names=tool_names,
             instructions=body.strip(),
             source=str(path),
+            readonly=readonly,
         ))
         count += 1
     return count
@@ -348,6 +381,8 @@ async def run_subagent(atype: AgentType, prompt: str, job: Job, parent_deps: Age
         tasks_store=None,
         job_registry=sub_registry,
         subagent_job=job,
+        # 只读事实随 deps 下发：file 工具据此硬拒写盘（权威强制在工具里，不依赖 hook）
+        readonly=atype.readonly,
     )
     log = open(job.log_path, "a", encoding="utf-8")
     log.write(f"=== sub agent {job.id}（{atype.name}）===\nprompt: {prompt}\n\n")

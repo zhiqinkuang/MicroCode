@@ -17,6 +17,7 @@ from rich.padding import Padding
 from rich.rule import Rule
 import questionary
 from agent.file_state import ReadFileState
+from agent.iteration import IterationState
 from tasks_store import TasksStore
 from file_history import FileHistory
 from background_jobs import JobRegistry
@@ -69,6 +70,9 @@ class SessionState:
     job_registry: JobRegistry = field(default=None)
     # 输入行攒着未发送的图片附件（Ctrl+V 粘贴）：提交时随本轮一起发给模型，ESC 清空
     attachments: list = field(default_factory=list)
+    # 编辑—验证—纠错闭环状态：跨一次 run 内的多轮模型调用累积，每次用户输入开始时 clear()。
+    # 按会话持有（/new /resume 换新实例），但不落盘：闭环是运行时概念，重放历史不该复活「未验证」判定
+    iteration: IterationState = field(default_factory=IterationState)
 
     def __post_init__(self):
         # tasks_store / file_history / job_registry 都依赖 session_id，没法用 default_factory（拿不到其他字段），在 __post_init__ 里按 session_id 建
@@ -226,6 +230,8 @@ async def cmd_new(state: SessionState) -> bool:
     state.read_file_state = ReadFileState()
     # 输入行攒着的图片附件随旧会话一起丢弃
     state.attachments.clear()
+    # 闭环状态换新实例：旧会话的「改过没验证」欠账不该跟到新会话
+    state.iteration = IterationState()
     # 换一个新的会话 ID，后续消息写进新文件
     state.session_id = session.new_session_id()
     # tasks_store / file_history / job_registry 按 session_id 隔离落盘，新会话用全新空 store
@@ -315,6 +321,9 @@ async def cmd_resume(state: SessionState) -> bool:
     # tasks_store / file_history 按 session_id 重建：旧会话磁盘上的数据会被 __init__ 灌进内存
     state.tasks_store = TasksStore(state.session_id)
     state.file_history = FileHistory(state.session_id)
+    # 闭环状态重建：恢复的会话里「哪些文件改过、验证过没有」无法从历史可靠还原，
+    # 宁可当作没有欠账——否则一恢复会话就会被一条催验证的提醒迎面砸中
+    state.iteration = IterationState()
     # 后台 job 注册表同样切换：旧会话还在跑的 job 先终止，避免进程泄露
     if killed:
         console.print(f"已终止旧会话 {killed} 个仍在运行的后台 job")

@@ -4,26 +4,23 @@ auto 模式分类器：发起一次独立的 LLM 请求，判断一次工具调�
 把对话投影成转写（transcript），连同待审查的工具调用一起喂给一个旁路 LLM，拿回「放行还是拦截」的裁决。
 """
 import json
-import os
-from pathlib import Path
 
-from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
-# .env 位于 agent/ 子目录，用绝对路径避免 CWD 不同导致加载失败
-load_dotenv(Path(__file__).parent / "agent" / ".env")
+# 端点与密钥复用主模型那一份配置：它是唯一事实来源。
+# 这里曾经写死 base_url 与模型名（无视 DEEPSEEK_API_BASE / DEEPSEEK_MODEL），
+# 结果是安全审查绕过用户配置的网关打到官方端点，且审查用的模型与主模型不是同一个。
+# agent.model 内部已用绝对路径加载 .env 并在缺 key 时抛错，不必在这里重复一遍。
+from agent.model import API_BASE, API_KEY, MODEL_NAME
 
 # classifier 和主循环用同一个模型、同一个 API Key，但请求是独立发起的，不经过 agent 框架
-API_KEY = os.getenv("DEEPSEEK_API_KEY")
-if not API_KEY:
-    raise RuntimeError("请先在 agent/.env 中设置 DEEPSEEK_API_KEY")
-
 _client = AsyncOpenAI(
     api_key=API_KEY,
-    base_url="https://api.deepseek.com",
+    base_url=API_BASE,
 )
 
-CLASSIFIER_MODEL = "deepseek-v4-flash"
+# 保留模块级别名：既修掉硬编码，又不必改动任何按名字引用它的调用方
+CLASSIFIER_MODEL = MODEL_NAME
 
 
 # classifier 的 system prompt：判定规则全部用自然语言描述，这是正则做不到的部分
