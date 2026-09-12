@@ -32,6 +32,10 @@ Thumbs.db
 coverage.json
 htmlcov/
 
+# Eval 运行记录：体积大、含本机路径与逐次模型输出，不进仓库。
+# 要复现某个结论时按记录里的命令重跑，而不是把记录本身提交上来。
+runs/
+
 # 本地测试脚本默认不进仓库；Skill 系统的完整测试脚本作为例外随代码提交
 test/*
 !test/test_skills.py

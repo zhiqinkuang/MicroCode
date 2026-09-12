@@ -1,0 +1,9 @@
+{
+  "id": "example-fix-addition",
+  "description": "src/calc.py 里的 add 函数实现错了：它返回两数之差而不是和。请修好它，让 tests/test_calc.py 里的测试全部通过。不要改动测试文件。",
+  "test_command": ["{python}", "-m", "pytest", "tests/test_calc.py", "-q"],
+  "hidden_test_command": ["{python}", "-m", "pytest", "tests/test_calc_hidden.py", "-q"],
+  "writable_paths": ["src/**/*.py"],
+  "readonly_paths": ["tests/**/*.py", "conftest.py", "pytest.ini", "pyproject.toml"],
+  "test_timeout_seconds": 120
+}
