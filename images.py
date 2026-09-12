@@ -115,6 +115,55 @@ def contains_image(content) -> bool:
     return isinstance(content, BinaryContent)
 
 
+def summarize_content(content) -> str:
+    """
+    把一轮用户输入压成可读摘要：文本原样保留，图片块只留媒体类型与大小。
+
+    content 可能是 str、运行时的 BinaryContent 列表，或从会话文件读回的序列化图片字典
+    （{"kind": "binary", "data": <base64>, "media_type": ...}）；无论哪种形态都绝不把
+    base64 或原始字节带进终端与会话列表。终端回放和会话列表摘要共用这一份规则。
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, (list, tuple)):
+        return str(content)
+    return " ".join(_summarize_item(item) for item in content)
+
+
+def _summarize_item(item) -> str:
+    if _is_image_block(item):
+        media_type = item.media_type if isinstance(item, BinaryContent) else item.get("media_type", "")
+        size_kb = _image_size_kb(item)
+        suffix = f"，{size_kb:.0f} KB" if size_kb is not None else ""
+        return f"[图片 {media_type}{suffix}]"
+    if isinstance(item, dict):
+        # 未知字典按文本处理，但绝不回显 data 字段：它可能是另一种二进制载荷
+        for key in ("text", "content", "value"):
+            value = item.get(key)
+            if isinstance(value, str):
+                return value
+        return "[未知内容块]"
+    return str(item)
+
+
+def _is_image_block(item) -> bool:
+    if isinstance(item, BinaryContent):
+        return True
+    return isinstance(item, dict) and (
+        item.get("kind") == "binary" or str(item.get("media_type", "")).startswith("image/")
+    )
+
+
+def _image_size_kb(item) -> float | None:
+    if isinstance(item, BinaryContent):
+        return len(item.data) / 1024
+    data = item.get("data")
+    if isinstance(data, str):
+        # base64 每 4 个字符还原 3 字节，等号是填充
+        return (len(data) - data.count("=")) * 3 / 4 / 1024
+    return None
+
+
 _CHECK_COMMANDS = {
     "Darwin": ["osascript", "-e", "clipboard info for «class PNGf»"],
     "Linux": ["sh", "-c", "xclip -selection clipboard -t image/png -o | wc -c"],

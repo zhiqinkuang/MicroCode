@@ -219,6 +219,24 @@ def test_contains_image_only_matches_image_blocks():
     assert images.contains_image([]) is False
 
 
+def test_summarize_content_handles_runtime_and_serialized_images():
+    runtime_image = BinaryContent(data=b"x" * 2048, media_type="image/png")
+    assert images.summarize_content("纯文本") == "纯文本"
+    assert images.summarize_content(["看图", runtime_image]) == "看图 [图片 image/png，2 KB]"
+
+    serialized = {"kind": "binary", "data": "eA==" * 1024, "media_type": "image/jpeg"}
+    summary = images.summarize_content(["读过了", serialized])
+    assert summary.startswith("读过了 [图片 image/jpeg，")
+    assert "eA==" not in summary
+
+
+def test_summarize_content_never_exposes_unknown_binary_fields():
+    unknown = {"kind": "binary", "data": "c2VjcmV0LXBheWxvYWQ=", "media_type": "application/pdf"}
+    assert "c2VjcmV0LXBheWxvYWQ=" not in images.summarize_content([unknown])
+    assert images.summarize_content([{"kind": "other", "data": "c2VjcmV0"}]) == "[未知内容块]"
+    assert images.summarize_content([{"text": "保留文本"}]) == "保留文本"
+
+
 def _extract_output_path(command: list[str], system: str) -> Path:
     if system == "Darwin":
         marker = 'POSIX file "'

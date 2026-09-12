@@ -8,6 +8,8 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length))
+        # 只记录 path 和 payload：请求头（尤其是 Authorization）刻意不进任何记录，
+        # 这样断言失败时打印 server.requests 也绝不会泄露密钥。
         self.server.requests.append({"path": self.path, "payload": payload})
         response = {
             "id": f"chatcmpl-{len(self.server.requests)}",

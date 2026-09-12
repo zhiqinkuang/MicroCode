@@ -191,3 +191,5 @@ def test_multimodal_session_round_trip_and_safe_summary(tmp_path, monkeypatch):
     assert "image/png" in summary
     assert "secret-image-bytes" not in summary
     assert "secret-image-bytes" not in _prompt_summary(restored_content)
+    # 会话列表摘要和终端回放必须用同一套规则，不能各自演化
+    assert summary == _prompt_summary(restored_content)

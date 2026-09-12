@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 import compact
+import images
 import os
 import logging
 import permissions
@@ -114,18 +115,10 @@ def _full(text) -> str:
 
 def _prompt_summary(content) -> str:
     """
-    用户输入可能是多模态内容块列表（图文混排）：文本块原样拼接，
-    图片块换成「[图片 类型，大小]」摘要，避免回放时把 base64 打到终端上。
+    用户输入可能是多模态内容块列表（图文混排）：摘要规则由 images.summarize_content 统一持有，
+    这里只做终端层转发，避免回放时把 base64 打到终端上、也避免和会话列表的规则漂移。
     """
-    if isinstance(content, str):
-        return content
-    pieces = []
-    for item in content:
-        if isinstance(item, BinaryContent):
-            pieces.append(f"[图片 {item.media_type}，{len(item.data) / 1024:.0f} KB]")
-        else:
-            pieces.append(str(item))
-    return " ".join(pieces)
+    return images.summarize_content(content)
 
 
 def _format_part_line(part) -> Optional[str]:

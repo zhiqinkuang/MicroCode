@@ -48,6 +48,11 @@
 - 错误信息更精确：`RuntimeError("请先设置环境变量 API_KEY")` 改为
   `RuntimeError("请先在 agent/.env 中设置 DEEPSEEK_API_KEY")`。
 
+### Chores
+
+- 图片摘要规则下沉到 `images.summarize_content`，终端回放与会话列表共用一份实现（此前两处各写一遍，
+  未知字典还可能回显 data 字段）；新增看守 INSTRUCTIONS 图片说明的回归测试，防止拒答问题静默复发。
+
 ## [0.1.0] - 2026-07-25
 
 ### Added

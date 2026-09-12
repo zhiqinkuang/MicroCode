@@ -5,6 +5,7 @@ from pydantic_ai.messages import BinaryContent, ModelResponse, TextPart, ToolCal
 from pydantic_ai.models.function import FunctionModel
 from pydantic_graph import End
 
+import agent.core as agent_core
 import agent.model as agent_model
 import images
 import main
@@ -133,6 +134,15 @@ class _FakeAgent:
     def iter(self, *args, **kwargs):
         self.seen_model = kwargs.get("model")
         return _FakeRun()
+
+
+def test_system_prompt_states_inline_images_are_available():
+    """
+    回归防线：带着系统提示词和文件工具时，模型曾以约 12% 的概率否认收到内联图片并要文件路径，
+    靠 INSTRUCTIONS 里这段说明压到 0/60（实测）。删掉它会静默复发，所以这里看守住。
+    """
+    assert "没有收到图片" in agent_core.INSTRUCTIONS
+    assert "read_file 工具也可能返回图片" in agent_core.INSTRUCTIONS
 
 
 def test_text_turn_selects_text_model():
