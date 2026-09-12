@@ -10,6 +10,11 @@
 - `/agents` 类型清单、分类后台任务计数、子代理审批冒泡和离线回归测试。
 - `auto` 权限模式：`ask` 的工具调用先交给旁路 LLM classifier 判定能否自动放行，classifier 拦截或出错时回退人工审批（fail-closed）。
 - `classifier.py`：把对话历史投影成防注入转写，调用 DeepSeek 裁决单次工具调用。转写只保留用户原话和工具调用，丢弃模型文本和工具输出；参数值超长截断防撑爆。
+- 图片输入：剪贴板粘贴（Ctrl+V / Alt+V）、`@图片路径` 与后台 `read_file` 读图三条路径统一校验与组装，
+  支持 PNG / JPEG / GIF / WebP，单张 10 MiB、单轮 8 张。
+- 视觉模型路由：含图片的一轮切到 `DEEPSEEK_VISION_MODEL`，普通文本轮继续用 `DEEPSEEK_MODEL`，`/status` 同时显示两者。
+- `scripts/live_images.py` 真实视觉发布冒烟、`scripts/check_image_coverage.py` 分支覆盖率门禁，
+  以及离线覆盖率单测、附件生命周期、FunctionModel Agent 链路、本地 OpenAI 兼容协议与 CLI PTY E2E。
 
 ### Fixed
 
