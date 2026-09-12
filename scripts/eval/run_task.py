@@ -356,17 +356,28 @@ def run_one(
         #    被判定器当成「改了白名单之外的路径」而误判（实现时踩到过）
         hidden_result = None
         if hidden_dir is not None and config.get("hidden_test_command"):
+            # 整体搬到 hidden/ 下面，保持夹具声明的目录结构（hidden_test_command 通常写成 pytest hidden/）。
+            # 不能把 hidden 的内容直接拍平进工作区根：那样既丢了目录结构，又可能覆盖工作区里同名文件。
+            hidden_target = workspace / "hidden"
+            hidden_target.mkdir(parents=True, exist_ok=True)
             for path in hidden_dir.rglob("*"):
                 if path.is_file():
-                    target = workspace / path.relative_to(hidden_dir)
+                    target = hidden_target / path.relative_to(hidden_dir)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(path, target)
             hidden_result = run_tests(
                 resolve_command(config["hidden_test_command"], workspace), workspace, timeout
             )
-            for path in hidden_dir.rglob("*"):
-                if path.is_file():
-                    (workspace / path.relative_to(hidden_dir)).unlink(missing_ok=True)
+            # 守卫：隐藏用例一个都没被收集到，说明是运行器/夹具把路径搞错了，
+            # **不是 agent 的问题**。不把它标出来的话，8 次运行全都会被判成「疑似硬编码」，
+            # 而实际上 agent 每次都改对了（本夹具真实踩到过，代价是 8 次真实执行白跑）。
+            if not hidden_result.get("collected"):
+                record["run"]["error"] = (
+                    "运行器故障：隐藏用例没有被收集到（collected 为空），"
+                    f"请检查夹具的 hidden/ 结构与 hidden_test_command。输出："
+                    f"{(hidden_result.get('output_tail') or '')[-400:]}"
+                )
+            shutil.rmtree(hidden_target, ignore_errors=True)
 
         after = snapshot(workspace)
         changed, diff_text = diff_since(before, after)
