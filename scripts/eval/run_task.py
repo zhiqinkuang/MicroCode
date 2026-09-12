@@ -272,6 +272,20 @@ def _short(value, limit: int = 400) -> str:
 DEFAULT_PERMISSION_MODE = "bypass"
 
 
+def isolate_home(sandbox: Path) -> Path:
+    """
+    把 HOME 指到临时目录，让 agent 的会话/任务/检查点/job 日志全部落在沙箱里。
+
+    必须在**构造任何会算 ~/.my-claude-code 路径的对象之前**调用：JobRegistry、
+    TasksStore、FileHistory、session 都在拿 Path.home()，指晚了就会写到真实家目录。
+    真实跑第一次就栽在这里——离线测试碰不到，因为 conftest 把 Path.home 打了桩。
+    """
+    home = sandbox / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    os.environ["HOME"] = str(home)
+    return home
+
+
 def run_one(
     task_dir: Path,
     version: str,
@@ -288,6 +302,7 @@ def run_one(
 
     config = load_task(task_dir)
     sandbox = Path(tempfile.mkdtemp(prefix=f"eval-{config['id']}-"))
+    isolate_home(sandbox)
     workspace = sandbox / "workspace"
     shutil.copytree(task_dir / "start", workspace)
 
@@ -404,6 +419,9 @@ def main() -> int:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # 最早时机就把 HOME 隔离掉：agent 侧多个模块在 import 期或无参构造时会读 Path.home()
+    if not os.environ.get("CODING_AGENT_EVAL_KEEP_HOME"):
+        isolate_home(Path(tempfile.mkdtemp(prefix="eval-home-")))
     record_path = run_one(
         args.task, args.version, args.repeat, args.out,
         keep=args.keep, permission_mode=args.permission_mode,
