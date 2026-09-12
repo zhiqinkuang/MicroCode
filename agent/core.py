@@ -12,6 +12,7 @@ from .tools import TOOLS
 # subagents 模块级 import：core 只在 project_context（每次请求时）取类型清单，
 # import 顺序上它不反向依赖 core，不会循环
 import subagents
+import skills
 # model 实例化拆去了 .model（subagent 也要用同一个 model，从 core 反向 import 会循环）
 from .model import model
 # 长期记忆：instructions 是静态约定（拼在主指令末尾），store 在 project_context 里每轮注入 MEMORY.md 索引
@@ -99,6 +100,12 @@ def project_context() -> str:
         parts.append("")
         parts.append("# 长期记忆索引\n以下是你的记忆清单（MEMORY.md），详情见各记忆文件：")
         parts.append(memory_index)
+
+    # Skill 第一层渐进式加载：每轮只注入 name + description，正文由 load_skill 按需读取。
+    skill_listing = skills.format_skill_listing(skills.discover_skills())
+    if skill_listing:
+        parts.append("")
+        parts.append(skill_listing)
 
     # run_agent 可用类型清单：自定义 agent 启动时才加载完，所以动态注入而不是写死
     agent_types = subagents.list_agent_types()
