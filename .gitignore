@@ -32,8 +32,9 @@ Thumbs.db
 coverage.json
 htmlcov/
 
-# 本地测试脚本目录：只在本地跑，不进仓库
-test/
+# 本地测试脚本默认不进仓库；Skill 系统的完整测试脚本作为例外随代码提交
+test/*
+!test/test_skills.py
 
 # Secrets
 .env

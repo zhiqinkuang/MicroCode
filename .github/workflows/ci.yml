@@ -25,8 +25,10 @@ jobs:
           uv run pytest tests/test_images.py --cov=images --cov-branch --cov-report=term-missing --cov-fail-under=90
           uv run coverage json -o coverage.json
           uv run python scripts/check_image_coverage.py
+      - name: Skill system functional tests
+        run: uv run python -B test/test_skills.py
       - name: Syntax check
-        run: uv run python -m compileall -q main.py images.py subagents.py background_jobs.py agent UI memory scripts session.py permissions.py classifier.py compact.py file_history.py mcp_servers.py mentions.py tasks_store.py tests scripts
+        run: uv run python -m compileall -q main.py images.py skills.py subagents.py background_jobs.py agent UI memory scripts session.py permissions.py classifier.py compact.py file_history.py mcp_servers.py mentions.py tasks_store.py tests scripts
       - name: Import check
         # compileall 查不出 import 错误（曾漏掉 main.py 从错误模块导入 print_welcome_banner），
         # 用假 key 做 import 级验证——model.py 只要变量非空，import 阶段不发请求

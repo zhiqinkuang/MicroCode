@@ -23,6 +23,7 @@ from mentions import build_mention_messages, extract_at_mentions
 from agent.reminders import build_job_reminder_text
 import images
 import subagents
+import skills
 
 logger = logging.getLogger(__name__)
 
@@ -201,6 +202,11 @@ async def main():
 
     # 建好记忆目录：system prompt 告诉模型「目录已存在，不要 mkdir」，这里必须先建
     memory_store.ensure_memory_dir()
+
+    # 启动时展示当前发现到的 Skill；具体正文仍留在磁盘，命中任务后才由 load_skill 读取。
+    skill_summary = skills.format_startup_summary(skills.discover_skills())
+    if skill_summary:
+        logger.info(skill_summary)
 
     # 启动时并发连接 .mcp.json 配置的 MCP server；/mcp 展示与 active_toolsets() 注入 Agent 都依赖 RECORDS
     summary = await mcp_servers.startup()

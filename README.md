@@ -8,6 +8,7 @@
 - **后台子代理**：`run_agent` 立即返回 job id，独立上下文执行，完成通知携带最终报告；支持并行派发、日志查看和 `job_kill` 终止。
 - **权限审批**：子代理每次工具调用单独检查权限，需要人工审批时排队等待主界面空闲。
 - **图片输入**：剪贴板粘贴、`@图片路径` 和 `read_file` 三条路径统一走校验与组装，支持 PNG / JPEG / GIF / WebP。
+- **渐进式 Skills**：每轮只注入 Skill 名称和描述，匹配任务后再加载完整工作流。
 - **斜杠命令**：
   - `/new` 开启新会话
   - `/status` 显示当前会话状态（模型 / 历史 / token 累计）
@@ -107,6 +108,7 @@ coding_agent/
 │   ├── hooks.py         # Hooks：抓取每次 model API 调用元数据
 │   └── .env.example     # 环境变量模板（真实 .env 已被 .gitignore 忽略）
 ├── subagents.py         # 子代理类型、执行器与审批队列
+├── skills.py            # Skill 发现、覆盖规则、目录生成与正文加载
 ├── background_jobs.py   # shell / agent 后台任务生命周期
 ├── session.py           # 会话持久化
 ├── compact.py           # 上下文压缩
@@ -114,6 +116,7 @@ coding_agent/
 ├── memory/              # 长期记忆召回与提炼
 ├── mcp_servers.py       # MCP 服务配置与连接
 ├── tests/               # 离线回归测试
+├── test/test_skills.py  # Skill 系统完整测试（支持可选真实模型测试）
 └── UI/
     ├── input_ui.py      # 输入框、后台任务计数与快捷键
     ├── render.py        # 终端渲染原语（console / print_step / banner）
@@ -159,6 +162,34 @@ tools: read_file, run_command
 用户拒绝时将原因返回子代理。终止任务会清除待处理审批；切换会话和退出会等待任务清理，
 子代理启动的后台命令也随之结束。
 
+## 使用 Skills
+
+每个 Skill 是一个包含 `SKILL.md` 的目录。个人 Skill 对所有项目生效，项目 Skill 只对当前目录生效；
+两者声明相同 `name` 时，项目定义覆盖个人定义：
+
+```text
+~/.my-claude-code/skills/<skill-name>/SKILL.md
+<project>/.my-claude-code/skills/<skill-name>/SKILL.md
+```
+
+`SKILL.md` 的 `name` 和 `description` 必填。项目内附带了代码审查示例：
+
+```markdown
+---
+name: reviewing-code
+description: 审查代码改动中的正确性、回归风险和测试缺口。用户要求 code review 或合并前检查时使用。
+---
+
+# 代码审查
+
+先阅读真实 diff 和附近的调用链，再给出结论。
+```
+
+Skill 分三层加载：Agent 每轮只看到所有 Skill 的名称和描述；匹配任务后调用 `load_skill`
+读取对应 `SKILL.md` 正文；正文引用的 `references/` 和 `scripts/` 文件继续通过现有文件、命令工具按需使用。
+没有命中的正文和资源不会进入上下文。启动时会显示当前发现的 Skill 名称，运行期间新增或修改 Skill
+会在下一次模型请求时自动反映，无需重启。
+
 ## 测试
 
 ```bash
@@ -187,3 +218,16 @@ PYTHONPATH=. no_proxy=api.deepseek.com uv run python scripts/live_images.py --re
 
 它在临时目录中验证主代理派发、子代理读取、报告回传、写文件审批和文件回退，结束后清理测试文件。
 CI 仅运行离线测试。
+
+Skill 系统的完整离线测试脚本可单独运行：
+
+```bash
+uv run python -B test/test_skills.py
+```
+
+它覆盖 frontmatter、个人/项目覆盖、无效配置、渐进式正文加载、动态刷新、工具注册、权限和
+instructions 注入。真实模型链路需要显式开启，会产生模型用量：
+
+```bash
+uv run python -B test/test_skills.py --live
+```
