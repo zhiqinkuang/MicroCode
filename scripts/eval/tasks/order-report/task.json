@@ -1,0 +1,10 @@
+{
+  "id": "order-report",
+  "description": "订单报表服务出错了：日报里 total 金额不对。业务口径要求「折扣先于税」——先算折后小计，再对折后小计计税，报表的 total 才是折后小计加税。请找出并修好实现里的问题，让 tests/ 下的测试全部通过。不要改动测试文件。",
+  "test_command": ["{python}", "-m", "pytest", "tests/", "-q"],
+  "hidden_test_command": ["{python}", "-m", "pytest", "hidden/", "-q"],
+  "writable_paths": ["src/**/*.py"],
+  "readonly_paths": ["tests/**/*.py", "hidden/**/*.py", "conftest.py", "pytest.ini", "pyproject.toml", "README.md", ".my-claude-code/**"],
+  "test_timeout_seconds": 180,
+  "fixture_notes": "刻意做成多文件、需要跨模块理解语义的任务：单看 pricing.py 的代码形态是「对」的，只有对照 README 的业务口径才能看出折扣被算在了税后。用它来量「探索」与「上下文隔离」这类机制，而不是一行式的 bug。"
+}

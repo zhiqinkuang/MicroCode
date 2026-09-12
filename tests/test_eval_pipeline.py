@@ -12,6 +12,10 @@ Eval 管线的离线测试：判定器自测 + 单任务运行器的接口与端
 """
 import copy
 import json
+import os
+import shutil
+import subprocess
+import sys
 
 import pytest
 from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
@@ -449,3 +453,97 @@ def test_runner_records_a_noop_agent_as_fail(tmp_path):
     verdict = judge(record)
     assert verdict["passed"] is False, "什么都没改却被判通过"
     assert verdict["reasons"], "FAIL 必须给出理由"
+
+# ============================ 夹具自证（防止白烧 token）============================
+
+ORDER_REPORT = REPO_ROOT / "scripts" / "eval" / "tasks" / "order-report"
+
+# 这个夹具的 bug 是「税基取错了变量」：折扣算对了，但税按未打折金额算。
+# 税基从 gross 改成 net 即为正解。
+GOLDEN_PATCH = (
+    "    tax = tax_cents(gross, tax_rate)",
+    "    tax = tax_cents(net, tax_rate)",
+)
+
+
+def _run_fixture_tests(workspace, target: str, extra_env=None):
+    """在夹具工作区里跑一次 pytest，返回 (returncode, 输出)。"""
+    env = os.environ.copy()
+    env.pop("CODING_AGENT_DISABLE_SKILLS", None)
+    env.pop("CODING_AGENT_DISABLE_SUBAGENTS", None)
+    if extra_env:
+        env.update(extra_env)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", target, "-q"],
+        cwd=workspace, capture_output=True, text=True, env=env, timeout=180,
+    )
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+def test_order_report_fixture_baseline_fails(tmp_path):
+    """
+    新夹具的基线必须失败。
+
+    如果哪天有人把这个夹具里的 bug「顺手修好」，基线就不再失败，
+    评测会把任务判成「没有可验证起点」——**静默烧掉整轮 token 却什么也没测到**。
+    这条用例就是防这个的。
+    """
+    workspace = tmp_path / "ws"
+    shutil.copytree(ORDER_REPORT / "start", workspace)
+    returncode, output = _run_fixture_tests(workspace, "tests/")
+    assert returncode != 0, f"夹具基线不该通过：\n{output[-800:]}"
+
+
+def test_order_report_fixture_is_solvable_with_the_golden_patch(tmp_path):
+    """
+    夹具必须有解，且解了之后可见测试与隐藏用例都通过。
+
+    这同时验证了两件事：夹具本身可解（不是无解题），以及隐藏用例的期望值
+    与正解一致（否则会出现「改对了却被隐藏用例判失败」的假失败）。
+    """
+    workspace = tmp_path / "ws"
+    shutil.copytree(ORDER_REPORT / "start", workspace)
+    # 隐藏用例放在工作区之外，靠 PYTHONPATH 指回工作区的 src/
+    hidden = tmp_path / "hidden"
+    shutil.copytree(ORDER_REPORT / "hidden", hidden)
+
+    pricing = workspace / "src" / "report" / "pricing.py"
+    source = pricing.read_text(encoding="utf-8")
+    assert GOLDEN_PATCH[0] in source, "夹具的 pricing.py 变了，请同步更新正解补丁"
+    pricing.write_text(source.replace(*GOLDEN_PATCH), encoding="utf-8")
+
+    visible_code, visible_out = _run_fixture_tests(workspace, "tests/")
+    assert visible_code == 0, f"应用正解后可见测试仍失败：\n{visible_out[-800:]}"
+
+    hidden_code, hidden_out = _run_fixture_tests(hidden, ".", {"PYTHONPATH": str(workspace)})
+    assert hidden_code == 0, f"应用正解后隐藏用例仍失败：\n{hidden_out[-800:]}"
+
+
+def test_order_report_fixture_requires_cross_module_understanding():
+    """
+    夹具必须保持「单文件看不出问题」的形状：pricing.py 里折扣算对了、只有税基错了。
+
+    这条守住夹具的设计意图——如果它退化成一眼可见的单行 bug，
+    就再也测不出「探索」与「上下文隔离」这类机制（P2-a 第一版夹具的教训）。
+    """
+    pricing = (ORDER_REPORT / "start" / "src" / "report" / "pricing.py").read_text(encoding="utf-8")
+    assert "apply_discount(gross, discount_rate)" in pricing, "折扣必须算对，错处只在税基"
+    assert "tax_cents(gross, tax_rate)" in pricing, "税基应当（错误地）取未打折金额"
+    assert "tax_cents(net, tax_rate)" not in pricing, "夹具里不该出现正解"
+
+    # 业务口径写在 README 里：模型必须读它才能判断税基该用哪一个
+    readme = (ORDER_REPORT / "README.md").read_text(encoding="utf-8")
+    assert "折扣先于税" in readme
+    # 项目自带 skill 讲金额约定：这是「按需加载 Skill」这条机制的用武之地
+    skill = (ORDER_REPORT / "start" / ".my-claude-code" / "skills" / "money-rules" / "SKILL.md").read_text(encoding="utf-8")
+    assert "折扣先于税" in skill
+
+
+def test_order_report_fixture_declares_readonly_paths_that_cover_tests():
+    """测试与隐藏用例必须在只读白名单里，否则「改测试通过」这条作弊路径就是敞开的。"""
+    config = load_task(ORDER_REPORT)
+    from scripts.eval.judge import _matches_any
+
+    for path in ("tests/test_pricing.py", "hidden/test_totals_hidden.py", "conftest.py", "README.md"):
+        assert _matches_any(path, config["readonly_paths"]), path
+    assert _matches_any("src/report/pricing.py", config["writable_paths"])
