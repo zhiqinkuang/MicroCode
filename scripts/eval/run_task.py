@@ -194,7 +194,7 @@ def parse_pytest_summary(output: str) -> dict:
 
 # ---------- 驱动 agent ----------
 
-async def drive_agent(prompt: str, workspace: Path, model=None) -> dict:
+async def drive_agent(prompt: str, workspace: Path, model=None, temperature: float | None = 0.0) -> dict:
     """
     在工作区里跑一轮 agent，收集事件流与用量。
 
@@ -221,9 +221,15 @@ async def drive_agent(prompt: str, workspace: Path, model=None) -> dict:
         iteration=IterationState(),
     )
 
+    # temperature 固定为 0：pydantic-ai 与产品默认都没设它，于是同一配置下 token 消耗的
+    # 变异系数实测约 29%（8 次执行、4 次重复），要验证 24% 量级的差异需要每组约 116 次。
+    # 评测必须先把噪声压下来，否则「机制有效」与「模型这次多跑了两遍测试」无法区分。
+    # 注意这是**实验设置**，不是产品改动：产品默认行为一个字不变。
+    model_settings = {"temperature": temperature} if temperature is not None else None
+
     async with main_agent.iter(
         prompt, deps=deps, message_history=[], model=model,
-        toolsets=[],
+        toolsets=[], model_settings=model_settings,
     ) as run:
         node = run.next_node
         while not isinstance(node, End):
@@ -294,6 +300,7 @@ def run_one(
     model=None,
     keep: bool = False,
     permission_mode: str = DEFAULT_PERMISSION_MODE,
+    temperature: float | None = 0.0,
 ) -> Path:
     import permissions
 
@@ -324,6 +331,7 @@ def run_one(
         },
         "meta": {"version": version, "repeat": repeat, "model": _model_label(model),
                  "switches": _switches(), "permission_mode": permission_mode,
+                 "temperature": temperature,
                  "started_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
         "run": {"changed_paths": [], "diff": "", "events": [], "error": None},
         "tests": {},
@@ -343,7 +351,9 @@ def run_one(
 
         # 2. 跑 agent
         os.chdir(workspace)
-        agent_result = asyncio.run(drive_agent(config["description"], workspace, model=model))
+        agent_result = asyncio.run(drive_agent(
+            config["description"], workspace, model=model, temperature=temperature
+        ))
         record["run"]["events"] = agent_result["events"]
         record["run"]["usage"] = agent_result["usage"]
         record["run"]["interventions"] = agent_result["interventions"]
@@ -427,6 +437,8 @@ def main() -> int:
     parser.add_argument("--keep", action="store_true", help="保留临时工作区以便事后排查")
     parser.add_argument("--permission-mode", default=DEFAULT_PERMISSION_MODE,
                         help="agent 的权限模式；eval 无人应答审批，默认 bypass")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="采样温度；默认 0 压噪声。传 -1 表示不设（跟随产品默认）")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -436,6 +448,7 @@ def main() -> int:
     record_path = run_one(
         args.task, args.version, args.repeat, args.out,
         keep=args.keep, permission_mode=args.permission_mode,
+        temperature=None if args.temperature < 0 else args.temperature,
     )
     record = json.loads(record_path.read_text(encoding="utf-8"))
 

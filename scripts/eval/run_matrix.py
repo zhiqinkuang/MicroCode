@@ -39,7 +39,10 @@ VERSIONS: dict[str, dict[str, str]] = {
 }
 
 
-def run_version(task: Path, version: str, repeats: int, out_dir: Path, permission_mode: str) -> list[Path]:
+def run_version(
+    task: Path, version: str, repeats: int, out_dir: Path,
+    permission_mode: str, temperature: float = 0.0,
+) -> list[Path]:
     """跑一个版本的全部重复次数，返回记录路径列表。"""
     switches = VERSIONS[version]
     records = []
@@ -50,6 +53,7 @@ def run_version(task: Path, version: str, repeats: int, out_dir: Path, permissio
             sys.executable, str(REPO_ROOT / "scripts" / "eval" / "run_task.py"),
             "--task", str(task), "--version", version, "--repeat", str(repeat),
             "--out", str(out_dir), "--permission-mode", permission_mode,
+            "--temperature", str(temperature),
         ]
         logger.info("→ %s 第 %d/%d 次  switches=%s", version, repeat, repeats, switches)
         started = time.monotonic()
@@ -144,6 +148,8 @@ def main() -> int:
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--out", type=Path, default=Path("runs"))
     parser.add_argument("--permission-mode", default="bypass")
+    parser.add_argument("--temperature", type=float, default=0.0,
+                        help="采样温度；默认 0 压噪声，传 -1 跟随产品默认")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -155,7 +161,9 @@ def main() -> int:
     all_records: list[Path] = []
     started = time.monotonic()
     for version in versions:
-        all_records.extend(run_version(args.task, version, args.repeats, args.out, args.permission_mode))
+        all_records.extend(run_version(
+            args.task, version, args.repeats, args.out, args.permission_mode, args.temperature
+        ))
 
     rows = summarize(all_records)
     print()
