@@ -85,8 +85,13 @@ Ctrl+V（macOS/Linux）或 Alt+V（Windows）粘贴剪贴板图片
 - 普通文本轮用 `DEEPSEEK_MODEL`；本轮内容里含图片块时整轮切到 `DEEPSEEK_VISION_MODEL`，
   `/status` 会同时显示两个模型名。
 - 视觉模型未配置（`DEEPSEEK_VISION_MODEL` 为空串）时，图片轮会明确报错而不会静默降级。
-- 注意：如果用纯文本提问让模型「用 read_file 读某张图」，这一轮由内容路由判为文本轮，
-  模型必须是具备视觉能力的那个。需要这条路正常工作时，把 `DEEPSEEK_MODEL` 也设成视觉模型即可。
+- 已知偶发行为：实验视觉模型（`deepseek-v4-flash-vision-exp`）在带完整系统提示词的一轮里，
+  约 5% 的调用会不回答图片内容、转而声称「没有收到图片」并要求给路径（实测 61 次真实调用中出现 2 次）。
+  图片本身确实已进入请求，重发一次即可；`deepseek-v4-flash` 未观察到该现象。
+- 用纯文本提问让模型「用 read_file 读某张图」时，这一轮按内容判为文本轮、走 `DEEPSEEK_MODEL`；
+  官方两个模型都接受图片输入（2026-09-12 实测 `deepseek-v4-flash` 能正确读出图片内容），
+  所以这条路径默认可用。只有把 `DEEPSEEK_MODEL` 指向不支持视觉的端点或中转模型时才需要留意——
+  那种情况下应把它设为具备视觉能力的模型，`scripts/live_images.py` 的 `read_file` 场景会直接暴露这个问题。
 
 ## 项目结构
 

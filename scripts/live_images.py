@@ -106,7 +106,6 @@ async def run_scenario(scenario: str, image_path: Path, work_dir: Path):
     import permissions
     import session
     from agent import MODEL_NAME, VISION_MODEL_NAME, select_turn_model
-    from agent.model import vision_model
     from memory import background as memory_background
     from UI.commands import SessionState
 
@@ -149,9 +148,10 @@ async def run_scenario(scenario: str, image_path: Path, work_dir: Path):
                 raise ValueError(f"未知场景：{scenario}")
 
             image_block = images.contains_image(content) or bool(getattr(state, "attachments", []))
-            # read_file 场景以纯文本开场、图片由工具返回，整轮必须支持视觉，因此显式使用视觉模型；
-            # 其余场景交给产品路由（select_turn_model）决定。
-            selected = vision_model if scenario == "read_file" else select_turn_model(content)
+            # 三个场景都走产品路由：含图片块的一轮用视觉模型；read_file 场景以纯文本开场、
+            # 图片由工具返回，考验的正是所配置 DEEPSEEK_MODEL 的视觉能力（2026-09-12 实测
+            # deepseek-v4-flash 能正确读图，见 README「模型路由」）。
+            selected = select_turn_model(content)
             configured_model = model_label(selected)
 
             await main.run_agent_loop(content, state, model=selected)
