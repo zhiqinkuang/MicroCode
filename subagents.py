@@ -168,6 +168,15 @@ _TOOL_FUNCS = {
     "run_command": run_command,
 }
 
+# 哪些工具属于「写」：派发自检、只读推导、只读类型的运行时强制都以它为准，口径只留这一处。
+# run_command 刻意不算——它可能只是 cat/grep，算成「写能力」会把 explore 的常规派发也变成要审批
+WRITE_TOOL_NAMES = frozenset({"edit_file", "write_file"})
+
+
+def has_write_tools(tool_names) -> bool:
+    """这组工具里是否包含写文件能力。派发自检与只读推导共用它，避免两处各写一遍判定。"""
+    return bool(set(tool_names) & WRITE_TOOL_NAMES)
+
 
 def _build_tools(tool_names: list[str]) -> list:
     # edit_file / write_file 标记 sequential=True，理由和主 TOOLS 一致：并发写盘会互相覆盖
